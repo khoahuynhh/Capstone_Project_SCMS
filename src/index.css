@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+    @apply transition-colors duration-300;
+}
+
+body {
+    @apply font-inter bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white;
+}
+
+html {
+    @apply bg-gray-50 dark:bg-gray-900;
+}
+
+
+[class^="ant-"],
+[class*=" ant-"] {
+    font-family: 'Inter', sans-serif !important;
+}
+
+.ant-input {
+    height: 54px;
+}

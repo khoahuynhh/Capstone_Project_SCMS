@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Cloud Server metrics
+  - job_name: 'cloud-server'
+    static_configs:
+      - targets: ['cloud-server:8000']
+    metrics_path: '/metrics'
+
+  # Edge Device 1 metrics
+  - job_name: 'edge-device-1'
+    static_configs:
+      - targets: ['edge-device-1:8001']
+
+  # Edge Device 2 metrics
+  - job_name: 'edge-device-2'
+    static_configs:
+      - targets: ['edge-device-2:8001']
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

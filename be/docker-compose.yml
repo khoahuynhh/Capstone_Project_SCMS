@@ -1,0 +1,175 @@
+services:
+  # MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mqtt-broker
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mqtt-broker/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt-data:/mosquitto/data
+      - mqtt-logs:/mosquitto/log
+    networks:
+      - edge-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      POSTGRES_DB: ${POSTGRES_DB:-retail_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - edge-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    networks:
+      - edge-network
+
+  # Cloud Server
+  cloud-server:
+    build:
+      context: ./cloud-server
+      dockerfile: Dockerfile
+    container_name: cloud-server
+    environment:
+      - DATABASE_URL=postgresql://admin:admin123@postgres:5432/retail_db
+      - REDIS_URL=redis://redis:6379
+      - MQTT_BROKER=mosquitto:1883
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./cloud-server:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - edge-network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Edge Device Simulator (Branch 1)
+  edge-device-1:
+    build:
+      context: ./edge-device
+      dockerfile: Dockerfile
+    container_name: edge-branch-1
+    environment:
+      - BRANCH_ID=branch_001
+      - BRANCH_NAME=Chi nhánh Quận 1
+      - MQTT_BROKER=mosquitto:1883
+      - CLOUD_API=http://cloud-server:8000
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./edge-device:/app
+    depends_on:
+      - mosquitto
+      - cloud-server
+      - redis
+    networks:
+      - edge-network
+    command: python main.py
+    ports:
+      - "8001:8001"
+
+  # Edge Device Simulator (Branch 2)
+  edge-device-2:
+    build:
+      context: ./edge-device
+      dockerfile: Dockerfile
+    container_name: edge-branch-2
+    environment:
+      - BRANCH_ID=branch_002
+      - BRANCH_NAME=Chi nhánh Quận 7
+      - MQTT_BROKER=mosquitto:1883
+      - CLOUD_API=http://cloud-server:8000
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./edge-device:/app
+    depends_on:
+      - mosquitto
+      - cloud-server
+      - redis
+    networks:
+      - edge-network
+    command: python main.py
+    ports:
+      - "8002:8001"
+
+  # Frontend (Vite dev server)
+  frontend:
+    image: node:20-alpine
+    container_name: frontend
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --host --port 5173"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../:/app
+    networks:
+      - edge-network
+    depends_on:
+      - cloud-server
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - edge-network
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    networks:
+      - edge-network
+    depends_on:
+      - prometheus
+
+networks:
+  edge-network:
+    driver: bridge
+
+volumes:
+  mqtt-data:
+  mqtt-logs:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
