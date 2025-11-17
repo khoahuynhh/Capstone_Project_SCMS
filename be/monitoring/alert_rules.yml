@@ -1,0 +1,91 @@
+groups:
+  - name: edge_ai_retail_alerts
+    interval: 30s
+    rules:
+      # High latency alert
+      - alert: HighInferenceLatency
+        expr: histogram_quantile(0.95, edge_inference_latency_seconds) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High inference latency detected"
+          description: "P95 latency is {{ $value }}s (threshold: 200ms)"
+      
+      # Low recommendation acceptance
+      - alert: LowRecommendationAcceptance
+        expr: (sum(edge_recommendations_accepted) / sum(edge_recommendations_total)) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low recommendation acceptance rate"
+          description: "Acceptance rate is {{ $value | humanizePercentage }}"
+      
+      # Edge device offline
+      - alert: EdgeDeviceOffline
+        expr: up{job="edge-device"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Edge device {{ $labels.branch_id }} is offline"
+          description: "Device has been down for more than 5 minutes"
+      
+      # Model deployment failure
+      - alert: ModelDeploymentFailed
+        expr: increase(model_deployment_failures_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model deployment failed"
+          description: "{{ $value }} deployment failures in the last 10 minutes"
+      
+      # Database connection issues
+      - alert: DatabaseConnectionIssues
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database is unreachable"
+          description: "Cannot connect to PostgreSQL database"
+      
+      # MQTT broker down
+      - alert: MQTTBrokerDown
+        expr: up{job="mosquitto"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MQTT broker is down"
+          description: "Edge devices cannot communicate with cloud"
+      
+      # High error rate
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP error rate"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+      
+      # Federated learning stalled
+      - alert: FederatedLearningStalled
+        expr: (time() - federated_learning_last_round_timestamp) > 172800
+        labels:
+          severity: warning
+        annotations:
+          summary: "Federated learning has not run in 48 hours"
+          description: "Last round was {{ $value | humanizeDuration }} ago"
+      
+      # Low disk space for models
+      - alert: LowModelStorageSpace
+        expr: node_filesystem_avail_bytes{mountpoint="/app/models"} / node_filesystem_size_bytes < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space for model storage"
+          description: "Only {{ $value | humanizePercentage }} space remaining"

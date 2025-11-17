@@ -1,0 +1,75 @@
+{
+  "dashboard": {
+    "title": "Edge AI Retail - System Overview",
+    "tags": ["edge-ai", "retail", "federated-learning"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Transactions (24h)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(edge_transactions_total[24h]))"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Recommendation Acceptance Rate",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "sum(edge_recommendations_accepted) / sum(edge_recommendations_total) * 100"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Inference Latency (p95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, edge_inference_latency_seconds)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 4,
+        "title": "Active Branches",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(count by (branch_id) (edge_inference_total))"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "Model Performance by Branch",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "edge_model_accuracy{model_type='recommender'}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Federated Learning Rounds",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "federated_learning_round_number"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12}
+      }
+    ]
+  }
+}
