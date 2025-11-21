@@ -48,8 +48,8 @@ class Transaction(Base):
     total_amount = Column(Float)
 
     # Recommendation context
-    recommended_items = Column(JSON)  # What was recommended
-    accepted_recommendations = Column(Boolean, default=False)
+    # recommended_items = Column(JSON)  # What was recommended
+    # accepted_recommendations = Column(Boolean, default=False)
 
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
