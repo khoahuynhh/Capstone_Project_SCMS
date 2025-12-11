@@ -4,7 +4,16 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const target = env.VITE_PROXY_TARGET || env.VITE_API_BASE_URL || 'http://cloud-server:8000'
+
+  // BE trung tâm
+  const serverTarget =
+    env.VITE_SERVER_API_BASE ||
+    env.VITE_API_BASE_URL ||          // fallback cho tương thích cũ
+    'http://cloud-server:8000'
+
+  // BE edge device
+  const edgeTarget =
+    env.VITE_EDGE_API_BASE || 'http://localhost:8001'
 
   return {
     plugins: [react()],
@@ -12,12 +21,23 @@ export default defineConfig(({ mode }) => {
       host: true,
       port: 5173,
       proxy: {
+        // gọi /api/... → đi tới BE server trung tâm
         '/api': {
-          target,
+          target: serverTarget,
           changeOrigin: true,
         },
         '/health': {
-          target,
+          target: serverTarget,
+          changeOrigin: true,
+        },
+
+        // gọi /edge-api/... → đi tới BE edge device
+        '/edge-api': {
+          target: edgeTarget,
+          changeOrigin: true,
+        },
+        '/edge-health': {
+          target: edgeTarget,
           changeOrigin: true,
         },
       },

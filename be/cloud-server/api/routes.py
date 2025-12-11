@@ -278,23 +278,14 @@ async def get_metrics_summary():
 # ============ Bulk Product Import API ============
 
 
-@router.post("/products/import-with-images")
-async def import_with_images(
-    excel_file: UploadFile = File(...), images_zip: UploadFile = File(...)
-):
-    # 1. Đọc Excel
+@router.post("/products/import-with-image-url")
+async def import_with_image_url(excel_file: UploadFile = File(...)):
+    # 1. Read excel
     df = pd.read_excel(excel_file.file)
 
-    required = {"product_id", "name", "price", "image_file"}
+    required = {"product_id", "name", "price", "image_url"}
     if not required.issubset(df.columns):
         return {"error": f"Excel must contain: {', '.join(required)}"}
-
-    # 2. Giải nén ZIP hình
-    images_path = "uploads/product_images"
-    os.makedirs(images_path, exist_ok=True)
-
-    with zipfile.ZipFile(images_zip.file, "r") as zip_ref:
-        zip_ref.extractall(images_path)
 
     db = SessionLocal()
 
@@ -303,27 +294,25 @@ async def import_with_images(
 
     try:
         for idx, row in df.iterrows():
-            image_file = row["image_file"]
-            image_path = f"{images_path}/{image_file}"
+            try:
+                new_product = Product(
+                    product_id=row["product_id"],
+                    name=row["name"],
+                    volume=row.get("volume"),
+                    price=row["price"],
+                    category=row.get("category"),
+                    stock=row.get("stock", 0),
+                    image_url=row.get("image_url"),  # lấy link từ excel
+                )
 
-            if not os.path.exists(image_path):
-                errors.append(f"Image not found: {image_file}")
-                continue
+                db.add(new_product)
+                db.commit()
+                db.refresh(new_product)
+                inserted += 1
 
-            # Lưu sản phẩm
-            new_product = Product(
-                product_id=row["product_id"],
-                name=row["name"],
-                price=row["price"],
-                category=row.get("category"),
-                stock=row.get("stock", 0),
-                image_url=f"/static/product_images/{image_file}",  # Path để FE dùng
-            )
-
-            db.add(new_product)
-            db.commit()
-            db.refresh(new_product)
-            inserted += 1
+            except Exception as e:
+                db.rollback()
+                errors.append(f"Row {idx}: {str(e)}")
 
         return {"status": "completed", "inserted": inserted, "errors": errors}
 

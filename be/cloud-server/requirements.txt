@@ -16,3 +16,4 @@ httpx==0.26.0
 pyjwt==2.8.0
 scipy==1.11.4
 alembic==1.13.1
+kafka-python==2.0.4
