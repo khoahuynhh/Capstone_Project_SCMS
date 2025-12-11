@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
   const serverTarget =
     env.VITE_SERVER_API_BASE ||
     env.VITE_API_BASE_URL ||          // fallback cho tương thích cũ
-    'http://cloud-server:8000'
+    'http://localhost:8000'
 
   // BE edge device
   const edgeTarget =

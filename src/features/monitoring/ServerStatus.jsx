@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { serverApi as api } from '../../../core/api';
+import { serverApi as api } from '../../core/api';
 
 const StatusPill = ({ ok, label }) => (
   <span className={`px-2 py-0.5 rounded text-xs font-medium ${ok ? 'bg-green-600/20 text-green-200' : 'bg-red-600/20 text-red-200'}`}>
