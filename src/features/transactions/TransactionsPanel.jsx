@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { serverApi as api } from '../../core/api/server_api';
+import { serverApi as api } from '../../../core/api';
 
 export default function TransactionsPanel() {
   const [loading, setLoading] = useState(true);

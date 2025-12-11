@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import Webcam from "react-webcam";
-import { edgeApi } from '../services/edgeApi';
+import { edgeApi } from "../../../core/api";
 
 const Camera = ({ captureToken, onResult, className = "" }) => {
   const webcamRef = useRef(null);
