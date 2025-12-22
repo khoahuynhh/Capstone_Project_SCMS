@@ -15,6 +15,7 @@ from config import get_settings
 from modules.face_detector import FaceDetector
 from modules.recommender import ProductRecommender
 from modules.kafka_client import EdgeKafkaProducer
+from modules.recommender import fetch_cloud_recommendations
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -122,30 +123,39 @@ async def face_identify(file: UploadFile = File(...)) -> Dict[str, Any]:
         # - 'embedding': list[float]
         # - 'customer_id': str
         # - 'similarity': float (nếu FaceDetector + FaceVerification có trả)
-        customer_id = face_data.get("customer_id")
-        attributes = face_data.get("attributes") or {}
-        similarity = float(face_data.get("similarity", 0.0))
+        # customer_id = face_data.get("customer_id")
+        # attributes = face_data.get("attributes") or {}
+        # similarity = float(face_data.get("similarity", 0.0))
         embedding = face_data.get("embedding")  # có thể None nếu bạn không trả
 
         logger.info(
             "Face recognized: customer_id=%s similarity=%.3f branch=%s device=%s",
             customer_id,
-            similarity,
+            # similarity,
             BRANCH_ID,
             DEVICE_ID,
         )
 
         # ----- 3. Lấy gợi ý sản phẩm từ recommender -----
-        recommendations = recommender.get_recommendations(
-            face_attributes=attributes,
-            customer_id=customer_id,
-        )
+        try:
+            recommendations = await fetch_cloud_recommendations(
+                branch_id=BRANCH_ID,
+                customer_id=customer_id,
+                top_k=5,
+            )
+        except Exception as e:
+            logger.warning("Cloud /recommend failed, fallback local recommender: %s", e)
+            recommendations = recommender.recommend_products(
+                face_attributes=attributes,
+                customer_id=customer_id,
+            )
 
         # ----- 4. Gửi event lên Kafka -----
         # Event này sẽ được backend server consume để:
         # - lưu vào DB
         # - làm analytics
         # - trigger marketing / automation, ...
+
         event = {
             "event_type": "face_recognized",
             "branch_id": BRANCH_ID,

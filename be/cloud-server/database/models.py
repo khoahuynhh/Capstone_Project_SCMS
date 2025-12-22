@@ -8,9 +8,14 @@ from sqlalchemy import (
     Boolean,
     Text,
     ForeignKey,
+    Index,
 )
 from sqlalchemy.ext.declarative import declarative_base
+from pgvector.sqlalchemy import Vector
 from datetime import datetime
+from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy.orm import relationship
+
 
 Base = declarative_base()
 
@@ -24,11 +29,15 @@ class Store(Base):
 
 class Product(Base):
     __tablename__ = "products"
-    id = Column(String(50), primary_key=True)
-    name = Column(String(200), nullable=False)
-    category = Column(String(100))
-    price = Column(Float)
-    product_meta = Column(JSON)
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, unique=True, index=True)
+    name = Column(String, nullable=False)
+    volume = Column(String)
+    price = Column(Float, nullable=False)
+    category = Column(String)
+    stock = Column(Integer, default=0)
+    image_url = Column(String)
 
 
 class Transaction(Base):
@@ -62,7 +71,7 @@ class TransactionItem(Base):
     __tablename__ = "transaction_items"
     id = Column(Integer, primary_key=True)
     transaction_id = Column(Integer, ForeignKey("transactions.id"))
-    product_id = Column(String(50), ForeignKey("products.id"))
+    product_id = Column(String(50), ForeignKey("products.product_id"))
     qty = Column(Integer)
     unit_price = Column(Float)
 
@@ -103,6 +112,12 @@ class Customer(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     customer_id = Column(String(100), unique=True, index=True, nullable=False)
+
+    # Basic info
+    first_name = Column(String(50))
+    last_name = Column(String(50))
+    phone = Column(String(20))
+    email = Column(String(120))
 
     # Demographics (aggregated, anonymized)
     age_group = Column(String(20))
@@ -151,6 +166,34 @@ class BranchMetrics(Base):
     out_of_stock_items = Column(JSON)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BranchInventory(Base):
+    __tablename__ = "branch_inventory"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    branch_id = Column(String(50), ForeignKey("stores.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+
+    stock = Column(Integer, nullable=False, default=0)
+    reserved = Column(
+        Integer, nullable=False, default=0
+    )  # optional: giữ hàng tạm (đặt trước)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    # relationships (optional nhưng nên có)
+    branch = relationship("Store", backref="inventories")
+    product = relationship("Product", backref="branch_inventories")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "branch_id", "product_id", name="uq_branch_inventory_branch_product"
+        ),
+        Index("ix_branch_inventory_branch_stock", "branch_id", "stock"),
+    )
 
 
 class ModelVersion(Base):
@@ -212,3 +255,371 @@ class FaceEvent(Base):
     transaction_id = Column(String(100), index=True, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==== Promotions ==== #
+class Promotion(Base):
+    __tablename__ = "promotions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)  # SALE1212
+    name = Column(String(255), nullable=False)
+
+    # PERCENT | FIXED | PROMO_PRICE
+    discount_type = Column(String(20), nullable=False)
+
+    start_at = Column(DateTime, nullable=False)
+    end_at = Column(DateTime, nullable=False)
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    branches = relationship(
+        "PromotionBranch", back_populates="promotion", cascade="all, delete-orphan"
+    )
+    products = relationship(
+        "PromotionProduct", back_populates="promotion", cascade="all, delete-orphan"
+    )
+
+
+class PromotionBranch(Base):
+    __tablename__ = "promotion_branches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    promotion_id = Column(
+        Integer, ForeignKey("promotions.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # ✅ KHỚP với BranchMetrics: stores.id là String
+    branch_id = Column(
+        String(50),
+        ForeignKey("stores.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    promotion = relationship("Promotion", back_populates="branches")
+    store = relationship("Store")  # nếu bạn có class Store trong models.py
+
+    __table_args__ = (
+        UniqueConstraint("promotion_id", "branch_id", name="uq_promotion_branch"),
+    )
+
+
+class PromotionProduct(Base):
+    __tablename__ = "promotion_products"
+
+    id = Column(Integer, primary_key=True, index=True)
+    promotion_id = Column(
+        Integer, ForeignKey("promotions.id", ondelete="CASCADE"), nullable=False
+    )
+
+    product_id = Column(
+        Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # PERCENT => 10 (10%), FIXED => 5000, PROMO_PRICE => 39000
+    discount_value = Column(Float, nullable=False)
+
+    max_qty_per_customer = Column(Integer, nullable=True)
+
+    promotion = relationship("Promotion", back_populates="products")
+    product = relationship("Product")
+
+    __table_args__ = (
+        UniqueConstraint("promotion_id", "product_id", name="uq_promotion_product"),
+    )
+
+
+# models for consent.py
+class CustomerConsent(Base):
+    """
+    Lưu trạng thái consent của khách hàng:
+    - được dùng trong /opt-in, /opt-out, GET /{customer_id}
+    - field created_at dùng để map ra ConsentResponse.created_at
+    """
+
+    __tablename__ = "customer_consents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(String(100), index=True, nullable=False)
+
+    # Consent flags
+    face_recognition_consent = Column(Boolean, default=False)
+    data_collection_consent = Column(Boolean, default=False)
+    marketing_consent = Column(Boolean, default=False)
+
+    # Opt-out info
+    opted_out = Column(Boolean, default=False)
+    opted_out_at = Column(DateTime, nullable=True)
+    opt_out_reason = Column(Text, nullable=True)
+
+    # Metadata về cách thu consent
+    consent_method = Column(String(50))  # kiosk, mobile, staff...
+    consent_ip_address = Column(String(50))
+    consent_location = Column(String(200))
+
+    # Data retention policy
+    data_retention_until = Column(DateTime, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class PrivacyAuditLog(Base):
+    """
+    Log mọi thao tác liên quan đến privacy:
+    - consent_given / consent_withdrawn / data_deleted
+    - được dùng trong delete_customer_data và get_audit_log
+    """
+
+    __tablename__ = "privacy_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(String(100), index=True, nullable=False)
+
+    operation_type = Column(String(50), nullable=False)
+    operation_details = Column(
+        JSON
+    )  # lưu dict chi tiết (reason, flags, deleted_records, ...)
+
+    performed_by = Column(String(100))  # ai thực hiện (thường là chính customer_id)
+    performed_by_role = Column(String(50))  # customer / staff / system
+    ip_address = Column(String(50), nullable=True)
+
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class FaceEmbedding(Base):
+    """
+    Lưu embedding khuôn mặt gắn với customer_id
+    - được xoá trong delete_customer_data
+    """
+
+    __tablename__ = "face_embeddings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(
+        String(100),
+        ForeignKey("customers.customer_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # Tuỳ bạn lưu kiểu gì: JSON, text, vector...
+    # Ở đây dùng JSON cho đơn giản (list số float)
+    embedding = Column(Vector(512), nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# models for ab_testing.py
+class ABExperiment(Base):
+    """
+    Lưu thông tin cấu hình của một A/B test:
+    - variant_a: cấu hình control (ví dụ model cũ, rule cũ)
+    - variant_b: cấu hình treatment (model mới, rule mới)
+    - split_ratio: tỉ lệ chia traffic (0.5 nghĩa là 50/50)
+    """
+
+    __tablename__ = "ab_experiments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    experiment_id = Column(String(100), unique=True, index=True, nullable=False)
+    experiment_name = Column(String(200), nullable=False)
+
+    # Lưu JSON config cho từng variant (tham số model, rule, UI, v.v.)
+    variant_a = Column(JSON, nullable=False)
+    variant_b = Column(JSON, nullable=False)
+
+    # 0.5 = 50/50, 0.2 = 20% A / 80% B hoặc tuỳ bạn quyết định cách dùng
+    split_ratio = Column(Float, default=0.5)
+
+    # Danh sách branch áp dụng (có thể None = all branches)
+    target_branches = Column(JSON, nullable=True)
+
+    # Metric chính để so sánh: "ctr", "conversion", "revenue", ...
+    target_metric = Column(String(50), default="ctr")
+
+    # Trạng thái: draft / running / completed
+    status = Column(String(50), default="draft")
+
+    # Thời gian chạy
+    start_date = Column(DateTime, nullable=True)
+    end_date = Column(DateTime, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ABExperimentEvent(Base):
+    """
+    Sự kiện/record tham gia A/B test:
+    - Mỗi dòng tương ứng 1 lần hiển thị recommendation / 1 session
+    - Dùng để tính conversion / CTR theo từng variant
+    """
+
+    __tablename__ = "ab_experiment_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    experiment_id = Column(String(100), index=True, nullable=False)
+
+    # 'a' hoặc 'b'
+    variant = Column(String(1), nullable=False)
+
+    # Có thể lưu thêm ngữ cảnh
+    branch_id = Column(String(50), ForeignKey("stores.id"), nullable=True)
+    customer_id = Column(String(100), nullable=True)
+    device_id = Column(String(50), ForeignKey("edge_devices.id"), nullable=True)
+
+    # Cờ converted: True nếu user mua / click / action thành công
+    converted = Column(Boolean, default=False)
+
+    # Nếu bạn muốn lưu thêm metric số như revenue, click_value,... thì thêm bên dưới
+    metric_value = Column(Float, nullable=True)
+
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+# models for federated_learning.py
+class FederatedLearningRound(Base):
+    """
+    Thông tin một vòng (round) federated learning:
+    - Ghi lại dùng model gì, phương pháp aggregation gì,
+      các chi nhánh nào tham gia, trạng thái round.
+    """
+
+    __tablename__ = "federated_learning_rounds"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Số thứ tự round (1, 2, 3, ...)
+    round_number = Column(Integer, unique=True, index=True, nullable=False)
+
+    # Kiểu model: "face_recognition", "recommender", ...
+    model_type = Column(String(100), nullable=False)
+
+    # fedavg / krum / trimmed_mean / median ...
+    aggregation_method = Column(String(50), default="fedavg")
+
+    # Danh sách branch tham gia ở round này (["branch_1", "branch_2", ...])
+    participating_branches = Column(JSON, nullable=True)
+    total_branches = Column(Integer, default=0)
+
+    # Trạng thái round: pending / aggregating / completed / failed
+    status = Column(String(50), default="pending")
+
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FederatedClientUpdate(Base):
+    """
+    Mỗi bản ghi là 1 lần client (branch/edge device) upload local update
+    cho một round FL:
+    - Lưu path file update, kích thước, loss/accuracy local, số sample train.
+    """
+
+    __tablename__ = "federated_client_updates"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    round_number = Column(Integer, index=True, nullable=False)
+
+    # Chi nhánh gửi update (branch_id trong hệ thống)
+    branch_id = Column(String(50), index=True, nullable=False)
+
+    # Đường dẫn file update trên server (pkl, npy,...)
+    update_path = Column(Text, nullable=False)
+    update_size_mb = Column(Float, nullable=True)
+
+    # Thông tin performance ở local
+    local_loss = Column(Float, nullable=True)
+    local_accuracy = Column(Float, nullable=True)
+    local_samples_count = Column(Integer, nullable=True)
+
+    # received / aggregated / rejected ...
+    status = Column(String(50), default="received")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# models for analytics.py
+class ModelPerformanceLog(Base):
+    """
+    Log hiệu năng online của model theo thời gian & chi nhánh:
+    - dùng cho API /analytics/model-performance
+    """
+
+    __tablename__ = "model_performance_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # version của model (map với ModelVersion.version)
+    model_version = Column(String(100), index=True, nullable=False)
+
+    # theo ngày (hoặc datetime tuỳ bạn log)
+    date = Column(DateTime, index=True, nullable=False)
+
+    branch_id = Column(String(50), nullable=True)
+
+    # metric top-k
+    precision_at_5 = Column(Float, nullable=True)
+    recall_at_5 = Column(Float, nullable=True)
+    ndcg_at_5 = Column(Float, nullable=True)
+
+    # behavior metrics
+    ctr = Column(Float, nullable=True)
+    avg_latency_ms = Column(Float, nullable=True)
+    p95_latency_ms = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InventoryOptimization(Base):
+    """
+    Lưu lại các khuyến nghị tối ưu tồn kho:
+    - restock / transfer / markdown
+    - có thể sinh từ batch job rồi FE gọi ra hiển thị
+    """
+
+    __tablename__ = "inventory_optimizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    branch_id = Column(String(50), index=True, nullable=False)
+    product_id = Column(String(100), index=True, nullable=False)
+
+    # 'restock', 'transfer', 'markdown', ...
+    action = Column(String(50), nullable=False)
+
+    # Số lượng đề xuất (dương/âm tuỳ logic bạn định nghĩa)
+    quantity = Column(Integer, nullable=False)
+
+    # priority: high / medium / low
+    priority = Column(String(20), default="medium")
+
+    # giải thích ngắn gọn: "High demand: 5.2 units/day", ...
+    reason = Column(Text, nullable=True)
+
+    # để biết đề xuất này còn hiệu lực không
+    status = Column(String(20), default="pending")  # pending / applied / ignored
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )

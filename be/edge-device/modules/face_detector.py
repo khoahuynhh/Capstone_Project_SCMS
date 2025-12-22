@@ -107,7 +107,7 @@ class FaceDetector:
         face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
 
         # 3. Nhận diện bằng FaceVerification
-        identity, similarity = self.verifier.recognize(face_rgb)
+        # identity, similarity = self.verifier.recognize(face_rgb)
 
         # 4. Lấy embedding thủ công từ cùng model + transform
         emb = self._get_embedding(face_rgb)
@@ -118,19 +118,19 @@ class FaceDetector:
         bbox = (x1, y1, x2 - x1, y2 - y1)
 
         # Nếu identity là "Unknown" thì tạo ID tạm từ hash embedding
-        if identity == "Unknown":
-            customer_id = self._generate_customer_id(emb)
-        else:
-            customer_id = identity
+        # if identity == "Unknown":
+        #     customer_id = self._generate_customer_id(emb)
+        # else:
+        #     customer_id = identity
 
-        attributes = self._mock_attributes(face_rgb)
+        # attributes = self._mock_attributes(face_rgb)
 
         return {
             "bbox": bbox,
-            "attributes": attributes,
+            # "attributes": attributes,
             "embedding": emb.tolist(),
-            "customer_id": customer_id,
-            "similarity": float(similarity),
+            # "customer_id": customer_id,
+            # "similarity": float(similarity),
         }
 
     # ---------------------- INTERNAL HELPERS ----------------------

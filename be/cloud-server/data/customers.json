@@ -1,0 +1,87 @@
+[
+  {
+    "id": 1,
+    "customer_id": "cust_16eabdc430",
+    "first_name": "Bùi Ngọc Khoa",
+    "last_name": "Huỳnh",
+    "phone": "0991080506",
+    "email": "cust_16e@demo.local",
+    "age_group": "18-25",
+    "gender": "male",
+    "total_transactions": 91,
+    "total_spent": 21248345.4,
+    "favorite_categories": [
+      "Đậu hũ",
+      "Rau củ tươi"
+    ],
+    "preferred_branch": "HCM - Thu Duc",
+    "avg_basket_size": 5.13,
+    "first_seen": "2024-08-31T20:17:53.631075",
+    "last_seen": "2024-10-30T20:17:53.631075",
+    "created_at": "2024-08-31T20:17:53.631075"
+  },
+  {
+    "id": 2,
+    "customer_id": "cust_afa3f934e1",
+    "first_name": "Thị Ngọc Hân",
+    "last_name": "Huỳnh",
+    "phone": "0986950619",
+    "email": "cust_afa@demo.local",
+    "age_group": "26-35",
+    "gender": "male",
+    "total_transactions": 79,
+    "total_spent": 17001125.83,
+    "favorite_categories": [
+      "Sữa & chế phẩm",
+      "Gia vị"
+    ],
+    "preferred_branch": "HCM - Thu Duc",
+    "avg_basket_size": 4.39,
+    "first_seen": "2025-02-10T20:17:53.631075",
+    "last_seen": "2025-04-11T20:17:53.631075",
+    "created_at": "2025-02-10T20:17:53.631075"
+  },
+  {
+    "id": 3,
+    "customer_id": "cust_d68319f109",
+    "first_name": "Vĩnh Lợi",
+    "last_name": "Lưu",
+    "phone": "0947127550",
+    "email": "cust_d68@demo.local",
+    "age_group": "18-25",
+    "gender": "female",
+    "total_transactions": 81,
+    "total_spent": 24229387.28,
+    "favorite_categories": [
+      "Dụng cụ bếp",
+      "Thẻ cào"
+    ],
+    "preferred_branch": "HCM - District 7",
+    "avg_basket_size": 5.49,
+    "first_seen": "2024-10-17T20:17:53.631075",
+    "last_seen": "2024-12-16T20:17:53.631075",
+    "created_at": "2024-10-17T20:17:53.631075"
+  },
+  {
+    "id": 4,
+    "customer_id": "cust_251f7ee8bc",
+    "first_name": "Thị Ánh Tuyết",
+    "last_name": "Võ",
+    "phone": "0902728806",
+    "email": "cust_251@demo.local",
+    "age_group": "18-25",
+    "gender": "female",
+    "total_transactions": 10,
+    "total_spent": 7191055.25,
+    "favorite_categories": [
+      "Thực phẩm đông lạnh",
+      "Sữa & chế phẩm",
+      "Snack"
+    ],
+    "preferred_branch": "HCM - District 1",
+    "avg_basket_size": 1.69,
+    "first_seen": "2025-06-25T20:17:53.631075",
+    "last_seen": "2025-08-24T20:17:53.631075",
+    "created_at": "2025-06-25T20:17:53.631075"
+  }
+]

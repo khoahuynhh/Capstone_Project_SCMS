@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # MQTT Broker
   mosquitto:
@@ -17,14 +15,14 @@ services:
 
   # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: postgres-db
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
       POSTGRES_DB: ${POSTGRES_DB:-retail_db}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -93,7 +91,7 @@ services:
       - edge-network
     command: python main.py
     ports:
-    - "8001:8001"
+      - "8001:8001"
 
   # Edge Device Simulator (Branch 2)
   edge-device-2:
@@ -118,7 +116,7 @@ services:
       - edge-network
     command: python main.py
     ports:
-    - "8002:8001"
+      - "8002:8001"
 
   # Prometheus Monitoring
   prometheus:
