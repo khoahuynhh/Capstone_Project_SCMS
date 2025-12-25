@@ -130,7 +130,6 @@ class FaceDetector:
             # "attributes": attributes,
             "embedding": emb.tolist(),
             # "customer_id": customer_id,
-            # "similarity": float(similarity),
         }
 
     # ---------------------- INTERNAL HELPERS ----------------------

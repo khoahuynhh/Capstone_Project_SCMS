@@ -14,8 +14,8 @@ from PIL import Image
 from config import get_settings
 from modules.face_detector import FaceDetector
 from modules.recommender import ProductRecommender
-from modules.kafka_client import EdgeKafkaProducer
 from modules.recommender import fetch_cloud_recommendations
+from modules.mqtt_client import MQTTClient
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -51,9 +51,6 @@ face_detector = FaceDetector(
 # Recommender: gợi ý sản phẩm theo chi nhánh
 recommender = ProductRecommender(settings.BRANCH_ID)
 
-# Kafka producer để đẩy event về server
-kafka_producer = EdgeKafkaProducer()
-
 # Thông tin định danh edge (có thể lấy từ .env / config)
 BRANCH_ID = os.getenv("BRANCH_ID", settings.BRANCH_ID)
 DEVICE_ID = os.getenv("DEVICE_ID", settings.DEVICE_ID)
@@ -78,96 +75,51 @@ def health_check() -> Dict[str, Any]:
 # ========= FACE IDENTIFICATION =========
 @app.post("/face/identify")
 async def face_identify(file: UploadFile = File(...)) -> Dict[str, Any]:
-    """
-    Nhận 1 frame từ FE (upload file image), chạy nhận diện khuôn mặt trên edge:
-      - Dùng FaceDetector để detect + extract embedding
-      - Gọi ProductRecommender để lấy danh sách gợi ý
-      - Trả JSON cho FE để hiển thị UI
-      - Đồng thời đẩy 1 event vào Kafka cho backend xử lý / lưu DB / analytics
-    """
     try:
-        # ----- 1. Đọc ảnh từ FE -----
         image_bytes = await file.read()
-
         try:
             pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception as e:
-            logger.warning("Không đọc được ảnh từ upload: %s", e)
+        except Exception:
             raise HTTPException(status_code=400, detail="Invalid image file")
 
-        # PIL → numpy RGB → BGR (cho đồng bộ với luồng OpenCV)
-        rgb = np.array(pil_img)
-        frame_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        frame_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-        # ----- 2. Nhận diện khuôn mặt trên frame -----
         face_data = face_detector.detect_and_extract(frame_bgr)
         if face_data is None:
-            logger.info("Không phát hiện khuôn mặt nào trong frame")
-
-            # Gửi event 'no_face' lên Kafka (nếu muốn track)
-            event = {
-                "event_type": "no_face",
-                "branch_id": BRANCH_ID,
-                "device_id": DEVICE_ID,
-                "timestamp": time.time(),
-            }
-            kafka_producer.publish_face_event(event)
-
             return {
                 "success": False,
                 "reason": "no_face_detected",
+                "branch_id": BRANCH_ID,
+                "device_id": DEVICE_ID,
             }
 
-        # face_data expected fields:
-        # - 'attributes': dict (age_group, gender, ...)
-        # - 'embedding': list[float]
-        # - 'customer_id': str
-        # - 'similarity': float (nếu FaceDetector + FaceVerification có trả)
-        # customer_id = face_data.get("customer_id")
-        # attributes = face_data.get("attributes") or {}
-        # similarity = float(face_data.get("similarity", 0.0))
-        embedding = face_data.get("embedding")  # có thể None nếu bạn không trả
+        embedding = face_data.get("embedding")
+        attributes = face_data.get("attributes") or {}
 
-        logger.info(
-            "Face recognized: customer_id=%s similarity=%.3f branch=%s device=%s",
-            customer_id,
-            # similarity,
-            BRANCH_ID,
-            DEVICE_ID,
+        # 1) MQTT RPC -> cloud identify + recommendations (realtime)
+        resp = MQTTClient.request_face_identify(
+            embedding=embedding,
+            attributes=attributes,
+            timeout=1.0,  # tune
         )
 
-        # ----- 3. Lấy gợi ý sản phẩm từ recommender -----
-        try:
-            recommendations = await fetch_cloud_recommendations(
-                branch_id=BRANCH_ID,
-                customer_id=customer_id,
-                top_k=5,
-            )
-        except Exception as e:
-            logger.warning("Cloud /recommend failed, fallback local recommender: %s", e)
+        # 2) Parse result + fallback
+        if resp.get("success"):
+            customer_id = resp.get("customer_id")
+            similarity = float(resp.get("similarity", 0.0))
+            recommendations = resp.get("recommendations", [])
+            source = "cloud_mqtt"
+        else:
+            # fallback local (tùy bạn: local verify + local recs)
+            customer_id = face_data.get("customer_id")  # nếu local detector có verify
+            similarity = float(face_data.get("similarity", 0.0))
             recommendations = recommender.recommend_products(
                 face_attributes=attributes,
                 customer_id=customer_id,
             )
+            source = f"fallback_{resp.get('reason','unknown')}"
 
-        # ----- 4. Gửi event lên Kafka -----
-        # Event này sẽ được backend server consume để:
-        # - lưu vào DB
-        # - làm analytics
-        # - trigger marketing / automation, ...
-
-        event = {
-            "event_type": "face_recognized",
-            "branch_id": BRANCH_ID,
-            "device_id": DEVICE_ID,
-            "customer_id": customer_id,
-            "similarity": similarity,
-            "attributes": attributes,
-            "timestamp": time.time(),
-        }
-        kafka_producer.publish_face_event(event)
-
-        # ----- 5. Trả response cho FE -----
+        # 4) Response cho FE
         return {
             "success": True,
             "branch_id": BRANCH_ID,
@@ -175,13 +127,11 @@ async def face_identify(file: UploadFile = File(...)) -> Dict[str, Any]:
             "customer_id": customer_id,
             "similarity": similarity,
             "face_attributes": attributes,
-            # embedding có thể không cần trả cho FE, tuỳ use-case:
-            "embedding": embedding,
             "recommendations": recommendations,
+            "source": source,
         }
 
     except HTTPException:
-        # đã raise ở trên với detail rõ ràng
         raise
     except Exception as e:
         logger.exception("Error in /face/identify: %s", e)
