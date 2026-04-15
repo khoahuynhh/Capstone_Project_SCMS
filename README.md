@@ -1,4 +1,4 @@
-# SMCS System – Edge AI Retail Platform
+#FBRS System – Edge AI Retail Platform
 
 A full-stack showcase that combines a React/Vite web console with a cloud backend, simulated edge devices, and a monitoring stack. The system streams customer interactions from multiple branches, runs face identification + recommendations at the edge, synchronizes data to a FastAPI cloud service, and exposes real-time metrics over Prometheus/Grafana.
 
@@ -37,12 +37,16 @@ A full-stack showcase that combines a React/Vite web console with a cloud backen
    - Frontend: `cp .env.example .env` and edit values (sample below).
    - Backend: `cd be && cp .env.example .env`. If you want to customize edge settings, also copy `edge-device/.env.example` to `edge-device/.env`.
 3. **Start every backend service**
+
    ```bash
    cd be
    ./start.sh             # optional helper; runs the steps below
    docker compose up -d   # build + start: cloud-server, edge devices, db, mqtt, monitoring
    docker compose ps      # verify all 8 services are "running"
    ```
+
+   for dev: docker compose up mosquitto postgres redis
+
 4. **Launch the frontend**
    ```bash
    cd ..                  # back to repo root

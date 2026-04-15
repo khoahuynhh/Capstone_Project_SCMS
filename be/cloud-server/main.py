@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 from api import routes
-from services.mqtt_subscriber import MQTTSubscriber
+from services.mqtt_cloud import MQTTSubscriber
 from database.db import init_db
 from prometheus_client import make_asgi_app
 from database.db import SessionLocal
@@ -54,7 +54,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

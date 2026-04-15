@@ -9,10 +9,12 @@ from sqlalchemy import (
     Text,
     ForeignKey,
     Index,
+    Numeric,
 )
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from pgvector.sqlalchemy import Vector
 from datetime import datetime
+from sqlalchemy import Date
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.orm import relationship
 
@@ -31,25 +33,87 @@ class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(String, unique=True, index=True)
+    product_code = Column(String, unique=True, index=True)
     name = Column(String, nullable=False)
     volume = Column(String)
-    price = Column(Float, nullable=False)
+    price = Column(Numeric(12, 2), nullable=False)
+    discount_price = Column(Float)
+    discount_percent = Column(Float)
     category = Column(String)
     stock = Column(Integer, default=0)
+    description = Column(Text)
     image_url = Column(String)
+    emotion = Column(String)
+    target_age_group = Column(String(20))
+    target_gender = Column(String(20))
+    usage_context = Column(String)
+
+
+class ProductAssociation(Base):
+    """
+    Lưu trữ kết quả từ thuật toán Data Mining (Apriori / FP-Growth).
+    Dùng để gợi ý: "Sản phẩm thường được mua cùng nhau".
+    """
+
+    __tablename__ = "product_associations"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Sản phẩm gốc (sản phẩm khách đang xem)
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # Sản phẩm gợi ý mua kèm
+    related_product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    # Độ tin cậy (Confidence): Xác suất mua B khi đã mua A (0.0 -> 1.0)
+    confidence = Column(Float, nullable=False)
+
+    # Độ mạnh của luật (Lift): Lift > 1 nghĩa là A và B có liên quan tích cực
+    lift = Column(Float, nullable=True)
+
+    # Tần suất xuất hiện cùng nhau (Support)
+    support = Column(Float, nullable=True)
+
+    # Quan hệ để dễ dàng lấy thông tin sản phẩm liên quan khi query
+    product = relationship("Product", foreign_keys=[product_id])
+    related_product = relationship("Product", foreign_keys=[related_product_id])
+
+    # Đảm bảo không lưu lặp lại một cặp luật
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "related_product_id", name="_product_related_uc"
+        ),
+    )
 
 
 class Transaction(Base):
     """Transaction records from edge devices"""
 
     __tablename__ = "transactions"
+    # Relationship
+    items = relationship(
+        "TransactionItem",
+        backref="transaction",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    store = relationship("Store")
 
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(String(50), ForeignKey("stores.id"), index=True, nullable=False)
     transaction_id = Column(String(100), unique=True, index=True, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    customer_id = Column(String(100), index=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), index=True)
     device_id = Column(
         String(50), ForeignKey("edge_devices.id"), index=True, nullable=False
     )
@@ -70,8 +134,8 @@ class Transaction(Base):
 class TransactionItem(Base):
     __tablename__ = "transaction_items"
     id = Column(Integer, primary_key=True)
-    transaction_id = Column(Integer, ForeignKey("transactions.id"))
-    product_id = Column(String(50), ForeignKey("products.product_id"))
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True, nullable=False)
     qty = Column(Integer)
     unit_price = Column(Float)
 
@@ -84,8 +148,8 @@ class Recommendation(Base):
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(String(50), ForeignKey("stores.id"), index=True, nullable=False)
     transaction_id = Column(String(100), index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    customer_id = Column(String(100), index=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), index=True, nullable=True)
     device_id = Column(
         String(50), ForeignKey("edge_devices.id"), index=True, nullable=False
     )
@@ -105,9 +169,20 @@ class Recommendation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class Customer(Base):
-    """Anonymized customer profiles"""
+class UserAccount(Base):
+    __tablename__ = "user_accounts"
 
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(120), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    is_admin = Column(Boolean, default=False)
+
+    customer_pk = Column(Integer, ForeignKey("customers.id"), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Customer(Base):
     __tablename__ = "customers"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -120,22 +195,58 @@ class Customer(Base):
     email = Column(String(120))
 
     # Demographics (aggregated, anonymized)
+    cccd = Column(String(20), unique=True, nullable=True)
+    address = Column(String(255), nullable=True)
+    birth_date = Column(Date, nullable=True)
+    age = Column(Integer, nullable=True)
     age_group = Column(String(20))
     gender = Column(String(20))
+    description = Column(Text, nullable=True)
 
     # Purchase behavior
-    total_transactions = Column(Integer, default=0)
-    total_spent = Column(Float, default=0)
-    favorite_categories = Column(JSON)
+    stats = relationship(
+        "CustomerStats",
+        back_populates="customer",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     # Preferences
     preferred_branch = Column(String(50), ForeignKey("stores.id"))
     avg_basket_size = Column(Float)
 
     # Timestamps
-    first_seen = Column(DateTime, default=datetime.utcnow)
-    last_seen = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    first_seen = Column(DateTime(timezone=True), default=datetime.utcnow)
+    last_seen = Column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CustomerStats(Base):
+    __tablename__ = "customer_stats"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(
+        Integer, ForeignKey("customers.id"), unique=True, nullable=False
+    )
+
+    # Purchase behavior
+    total_transactions = Column(Integer, default=0)
+    total_spent = Column(Numeric(15, 2), default=0)  # Use Numeric for price
+    avg_basket_size = Column(Numeric(12, 2), default=0)  # Average spend per transaction
+
+    # Logic phức tạp
+    favorite_categories = Column(JSON)  # Top 3 category
+    last_purchase_date = Column(DateTime)
+
+    # Loyalty / Segmentation
+    rank_score = Column(Float, default=0)  # Points to rank customers
+    segment = Column(String(50))  # VIP, Potential, Churn...
+
+    updated_at = Column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    customer = relationship("Customer", back_populates="stats")
 
 
 class BranchMetrics(Base):
@@ -145,7 +256,7 @@ class BranchMetrics(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(String(50), ForeignKey("stores.id"), index=True, nullable=False)
-    date = Column(DateTime, index=True, nullable=False)
+    date = Column(Date, index=True, nullable=False)
 
     # Transaction metrics
     total_transactions = Column(Integer, default=0)
@@ -166,6 +277,9 @@ class BranchMetrics(Base):
     out_of_stock_items = Column(JSON)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("branch_id", "date", name="uq_branch_metrics_branch_date"),
+    )
 
 
 class BranchInventory(Base):
@@ -177,14 +291,12 @@ class BranchInventory(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
 
     stock = Column(Integer, nullable=False, default=0)
-    reserved = Column(
-        Integer, nullable=False, default=0
-    )  # optional: giữ hàng tạm (đặt trước)
+    reserved = Column(Integer, nullable=False, default=0)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
-    # relationships (optional nhưng nên có)
+    # relationships
     branch = relationship("Store", backref="inventories")
     product = relationship("Product", backref="branch_inventories")
 
@@ -245,16 +357,18 @@ class FaceEvent(Base):
     device_id = Column(String(50), ForeignKey("edge_devices.id"), index=True)
 
     event_type = Column(String(50), nullable=False)  # 'face_recognized', 'no_face'
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
-    customer_id = Column(String(100), index=True)  # có thể None nếu unknown
+    customer_id = Column(
+        Integer, ForeignKey("customers.id"), index=True
+    )  # có thể None nếu unknown
     similarity = Column(Float)
     face_attributes = Column(JSON)  # age_group, gender, ...
 
     # Liên kết với transaction nếu có (sau khi mua xong)
     transaction_id = Column(String(100), index=True, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 # ==== Promotions ==== #
@@ -262,7 +376,7 @@ class Promotion(Base):
     __tablename__ = "promotions"
 
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(50), unique=True, nullable=False, index=True)  # SALE1212
+    code = Column(String(50), unique=True, nullable=False, index=True)  
     name = Column(String(255), nullable=False)
 
     # PERCENT | FIXED | PROMO_PRICE
@@ -290,7 +404,6 @@ class PromotionBranch(Base):
         Integer, ForeignKey("promotions.id", ondelete="CASCADE"), nullable=False
     )
 
-    # ✅ KHỚP với BranchMetrics: stores.id là String
     branch_id = Column(
         String(50),
         ForeignKey("stores.id", ondelete="CASCADE"),
@@ -299,7 +412,7 @@ class PromotionBranch(Base):
     )
 
     promotion = relationship("Promotion", back_populates="branches")
-    store = relationship("Store")  # nếu bạn có class Store trong models.py
+    store = relationship("Store")
 
     __table_args__ = (
         UniqueConstraint("promotion_id", "branch_id", name="uq_promotion_branch"),
@@ -315,7 +428,10 @@ class PromotionProduct(Base):
     )
 
     product_id = Column(
-        Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
 
     # PERCENT => 10 (10%), FIXED => 5000, PROMO_PRICE => 39000
@@ -342,7 +458,9 @@ class CustomerConsent(Base):
     __tablename__ = "customer_consents"
 
     id = Column(Integer, primary_key=True, index=True)
-    customer_id = Column(String(100), index=True, nullable=False)
+    customer_id = Column(
+        Integer, ForeignKey("customers.id"), index=True, nullable=False
+    )
 
     # Consent flags
     face_recognition_consent = Column(Boolean, default=False)
@@ -360,12 +478,12 @@ class CustomerConsent(Base):
     consent_location = Column(String(200))
 
     # Data retention policy
-    data_retention_until = Column(DateTime, nullable=True)
+    data_retention_until = Column(DateTime(timezone=True), nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(
-        DateTime,
+        DateTime(timezone=True),
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
     )
@@ -381,7 +499,9 @@ class PrivacyAuditLog(Base):
     __tablename__ = "privacy_audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    customer_id = Column(String(100), index=True, nullable=False)
+    customer_id = Column(
+        Integer, ForeignKey("customers.id"), index=True, nullable=False
+    )
 
     operation_type = Column(String(50), nullable=False)
     operation_details = Column(
@@ -395,7 +515,7 @@ class PrivacyAuditLog(Base):
     success = Column(Boolean, default=True)
     error_message = Column(Text, nullable=True)
 
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
 
 class FaceEmbedding(Base):
@@ -408,8 +528,8 @@ class FaceEmbedding(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     customer_id = Column(
-        String(100),
-        ForeignKey("customers.customer_id", ondelete="CASCADE"),
+        Integer,
+        ForeignKey("customers.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -453,12 +573,14 @@ class ABExperiment(Base):
     status = Column(String(50), default="draft")
 
     # Thời gian chạy
-    start_date = Column(DateTime, nullable=True)
-    end_date = Column(DateTime, nullable=True)
+    start_date = Column(DateTime(timezone=True), nullable=True)
+    end_date = Column(DateTime(timezone=True), nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class ABExperimentEvent(Base):
@@ -471,14 +593,19 @@ class ABExperimentEvent(Base):
     __tablename__ = "ab_experiment_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    experiment_id = Column(String(100), index=True, nullable=False)
+    experiment_id = Column(
+        String(100),
+        ForeignKey("ab_experiments.experiment_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
     # 'a' hoặc 'b'
     variant = Column(String(1), nullable=False)
 
     # Có thể lưu thêm ngữ cảnh
     branch_id = Column(String(50), ForeignKey("stores.id"), nullable=True)
-    customer_id = Column(String(100), nullable=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     device_id = Column(String(50), ForeignKey("edge_devices.id"), nullable=True)
 
     # Cờ converted: True nếu user mua / click / action thành công
@@ -487,7 +614,7 @@ class ABExperimentEvent(Base):
     # Nếu bạn muốn lưu thêm metric số như revenue, click_value,... thì thêm bên dưới
     metric_value = Column(Float, nullable=True)
 
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
 
 # models for federated_learning.py
@@ -536,7 +663,12 @@ class FederatedClientUpdate(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    round_number = Column(Integer, index=True, nullable=False)
+    round_number = Column(
+        Integer,
+        ForeignKey("federated_learning_rounds.round_number", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
     # Chi nhánh gửi update (branch_id trong hệ thống)
     branch_id = Column(String(50), index=True, nullable=False)
@@ -568,7 +700,12 @@ class ModelPerformanceLog(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # version của model (map với ModelVersion.version)
-    model_version = Column(String(100), index=True, nullable=False)
+    model_version = Column(
+        String(100),
+        ForeignKey("model_versions.version", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
     # theo ngày (hoặc datetime tuỳ bạn log)
     date = Column(DateTime, index=True, nullable=False)
@@ -599,8 +736,18 @@ class InventoryOptimization(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    branch_id = Column(String(50), index=True, nullable=False)
-    product_id = Column(String(100), index=True, nullable=False)
+    branch_id = Column(
+        String(50),
+        ForeignKey("stores.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
     # 'restock', 'transfer', 'markdown', ...
     action = Column(String(50), nullable=False)
@@ -622,4 +769,12 @@ class InventoryOptimization(Base):
         DateTime,
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "branch_id",
+            "product_id",
+            "action",
+            name="uq_inventory_opt_branch_product_action",
+        ),
     )

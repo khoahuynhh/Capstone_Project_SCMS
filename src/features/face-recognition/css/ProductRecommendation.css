@@ -1,0 +1,1189 @@
+/* --- VARIABLES & THEME (EdgeScan Style) --- */
+:root {
+    /* Palette màu "Clean" */
+    --c-text-main: rgba(17, 24, 39, 0.95);
+    /* Màu chữ chính: Đen than */
+    --c-text-muted: rgba(17, 24, 39, 0.60);
+    /* Màu chữ phụ: Xám */
+    --c-primary: #0f172a;
+    /* Màu chủ đạo: Slate 900 (Đen xanh) */
+    --c-accent: #2563eb;
+    /* Màu nhấn: Royal Blue (cho giá tiền/nút active) */
+    --c-danger: #ef4444;
+
+    --bg-overlay: rgba(255, 255, 255, 0.4);
+    /* Nền overlay sáng */
+    --bg-surface: #ffffff;
+    --bg-subtle: #f8fafc;
+    /* Nền xám rất nhạt (Slate 50) */
+
+    /* Border & Glass effect */
+    --glass-border: 1px solid rgba(15, 23, 42, 0.08);
+    --border-dashed: 1px dashed rgba(15, 23, 42, 0.2);
+
+    /* Radius & Shadow */
+    --radius-xl: 20px;
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-card: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    --shadow-float: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.03);
+
+    --header-height: 70px;
+    --ui: 0.8;
+}
+
+/* --- BASE STYLES --- */
+.recoOverlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    opacity: 0;
+    animation: fadeInOverlay 0.3s forwards;
+
+    /* CHÚ Ý: Đã chuyển background-color và blur sang ::after */
+}
+
+/* --- LỚP DƯỚI CÙNG: ẢNH NỀN --- */
+.recoOverlay::before {
+    content: "";
+    position: absolute;
+    /* Chuyển sang absolute để bám theo .recoOverlay */
+    inset: 0;
+    background: url("https://raw.githubusercontent.com/khoahuynhh/HungPhatCaoNguyenCoffee/master/new_background.png") no-repeat center;
+    background-size: cover;
+    background-position: calc(50% + 0px) calc(50% + 20px);
+    z-index: -2;
+}
+
+/* --- LỚP GIỮA: HIỆU ỨNG KÍNH MỜ (Đè lên ảnh nền và làm mờ nó) --- */
+.recoOverlay::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: var(--bg-overlay);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    z-index: -1;
+}
+
+@keyframes fadeInOverlay {
+    to {
+        opacity: 1;
+    }
+}
+
+/* --- MAIN CONTAINER --- */
+.recoShell {
+    position: relative;
+    width: 100%;
+    max-width: 1400px;
+    margin: auto;
+    height: 90vh;
+    background: var(--bg-surface);
+    /* Border mỏng tinh tế */
+    border: 2px solid #f9a8d4;
+    border-radius: var(--radius-xl);
+    /* Đổ bóng sâu nhưng mềm */
+    box-shadow: var(--shadow-float);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transform: scale(0.98);
+    transform-origin: center;
+    opacity: 0;
+    animation: popIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes popIn {
+    to {
+        /* transform: scale(1); */
+        opacity: 1;
+    }
+}
+
+/* --- HEADER (Clean Style) --- */
+.recoHeader {
+    min-height: var(--header-height);
+    padding: 14px 24px;
+    background: rgba(255, 255, 255, 0.85);
+    /* Trong suốt nhẹ */
+    backdrop-filter: blur(8px);
+    border-bottom: var(--glass-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    z-index: 10;
+}
+
+.recoHeaderActions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.recoHeaderBtn {
+    background: rgba(15, 23, 42, 0.04);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    color: var(--c-text-main);
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.recoHeaderBtn:hover {
+    background: rgba(15, 23, 42, 0.08);
+}
+
+.recoHeaderBtn.active {
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    border-color: rgba(15, 23, 42, 0.2);
+}
+
+
+.recoHeader h2 {
+    font-size: 1.35rem;
+    font-weight: 800;
+    /* Font đậm theo phong cách EdgeScan */
+    color: var(--c-text-main);
+    letter-spacing: 0;
+    margin: 0;
+}
+
+.recoCloseBtn {
+    background: rgba(15, 23, 42, 0.04);
+    border: 1px solid transparent;
+    color: var(--c-text-main);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.recoCloseBtn:hover {
+    background: rgba(15, 23, 42, 0.08);
+    transform: rotate(90deg);
+}
+
+/* --- BODY LAYOUT --- */
+.recoBody {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    background: var(--bg-subtle);
+    /* Nền xám nhạt cho khu vực nội dung */
+}
+
+/* CỘT TRÁI: SẢN PHẨM */
+.recoMain {
+    flex: 3;
+    padding: 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+/* CỘT PHẢI: SIDEBAR */
+.recoSidebar {
+    flex: 1;
+    min-width: 380px;
+    max-width: 440px;
+    background: var(--bg-surface);
+    /* Sidebar nền trắng để nổi bật trên nền xám */
+    border-left: var(--glass-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 5;
+    min-height: 0;
+}
+
+.recoSidebarContent {
+    padding: 24px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+/* --- SEARCH BAR (Clean Input) --- */
+.recoSearch {
+    position: relative;
+    max-width: 500px;
+    margin-bottom: 8px;
+}
+
+.recoSearch svg {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--c-text-muted);
+}
+
+.recoSearch input {
+    width: 100%;
+    padding: 12px 16px 12px 44px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    border-radius: var(--radius-md);
+    font-size: 0.95rem;
+    background: #fff;
+    color: var(--c-text-main);
+    transition: all 0.2s;
+    box-shadow: var(--shadow-sm);
+}
+
+.recoSearch input:focus {
+    outline: none;
+    border-color: var(--c-primary);
+    box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.05);
+}
+
+/* --- PRODUCT GRID --- */
+.recoGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 20px;
+    padding-bottom: 40px;
+}
+
+/* --- CARD STYLE (Giống .card của EdgeScan) --- */
+.recoCard {
+    background: #fff;
+    border: 2px solid rgba(15, 23, 42, 0.08);
+    /* Viền mỏng */
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.02);
+    /* Bóng rất nhẹ */
+    display: flex;
+    flex-direction: column;
+}
+
+.recoCard:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 24px -6px rgba(15, 23, 42, 0.12);
+    /* Bóng sâu hơn khi hover */
+    border-color: rgba(15, 23, 42, 0.15);
+}
+
+.recoCardImg {
+    position: relative;
+    width: 100%;
+    padding-top: 100%;
+    background: #f1f5f9;
+    overflow: hidden;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.04);
+}
+
+.recoCardImg img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.4s ease;
+}
+
+.recoCard:hover .recoCardImg img {
+    transform: scale(1.05);
+}
+
+/* Badge style giống .chip */
+.recoBadge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(4px);
+    color: var(--c-danger);
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 4px 10px;
+    border-radius: 99px;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    box-shadow: var(--shadow-sm);
+}
+
+.recoCardContent {
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+}
+
+.recoCardTitle {
+    margin: 0 0 4px 0;
+    font-size: 0.85rem;
+    /* nhỏ hơn */
+    font-weight: 500;
+    color: var(--c-text-main);
+    line-height: 1.35;
+    /* gọn hơn */
+
+    overflow: hidden;
+    display: -webkit-box;
+    line-clamp: 2;
+    /* đúng cú pháp */
+    -webkit-box-orient: vertical;
+
+    text-overflow: ellipsis;
+}
+
+.recoCardPrice {
+    font-weight: 800;
+    font-size: 0.9rem;
+    letter-spacing: 0.3px;
+    color: var(--c-primary);
+
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    margin-bottom: 6px;
+}
+
+.recoCardOldPrice {
+    font-weight: 500;
+    font-size: 0.85rem;
+    color: var(--c-text-muted);
+    text-decoration: line-through;
+}
+
+/* Nút thêm kiểu Ghost/Secondary */
+.recoCardAddBtn {
+    margin-top: auto;
+    width: 100%;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    background: transparent;
+    color: var(--c-text-main);
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.2s;
+}
+
+.recoCardAddBtn:hover {
+    background: rgba(15, 23, 42, 0.04);
+    border-color: rgba(15, 23, 42, 0.2);
+}
+
+/* ================= SIDEBAR ================= */
+
+/* Tabs: Style giống segmented control */
+.recoTabs {
+    display: flex;
+    background: #f1f5f9;
+    /* Slate 100 */
+    padding: 4px;
+    margin: 16px;
+    border-radius: var(--radius-md);
+    gap: 4px;
+}
+
+.recoTab {
+    flex: 1;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    color: var(--c-text-muted);
+    font-weight: 600;
+    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.recoTab.active {
+    background: #fff;
+    color: var(--c-text-main);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* Cart List */
+.recoCartList {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 16px 16px;
+}
+
+/* Customer Profile (in sidebar) */
+.recoProfileWrap {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+
+.recoProfileWrap .profile-container {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+}
+
+.recoProfileWrap .profile-header {
+    padding: 16px;
+    gap: 12px;
+}
+
+.recoProfileWrap .profile-avatar {
+    width: 56px;
+    height: 56px;
+    font-size: 22px;
+}
+
+.recoProfileWrap .profile-grid {
+    grid-template-columns: 1fr;
+}
+
+.recoProfileWrap .profile-footer {
+    margin-top: 16px;
+}
+
+.recoCartItem {
+    display: flex;
+    gap: 12px;
+    padding: 10px;
+    background: #fff;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: var(--radius-md);
+    margin-bottom: 10px;
+    transition: border-color 0.2s;
+}
+
+.recoCartItem:hover {
+    border-color: rgba(15, 23, 42, 0.2);
+}
+
+.recoCartItem img {
+    width: 60px;
+    height: 60px;
+    border-radius: var(--radius-sm);
+    object-fit: cover;
+    background: #f8fafc;
+}
+
+.recoCartItemInfo h4 {
+    margin: 0 0 4px 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--c-text-main);
+}
+
+.recoCartItemInfo .price {
+    font-weight: 700;
+    color: var(--c-primary);
+    font-size: 0.9rem;
+}
+
+/* Qty Control: Minimalist */
+.recoQtyControl {
+    display: inline-flex;
+    align-items: center;
+    background: #f1f5f9;
+    border-radius: 6px;
+    margin-top: 4px;
+    height: 28px;
+}
+
+.recoQtyControl button {
+    width: 28px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--c-text-main);
+}
+
+.recoQtyControl button:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.recoQtyControl span {
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0 6px;
+}
+
+.recoRemoveBtn {
+    border: none;
+    background: transparent;
+    color: var(--c-text-muted);
+    cursor: pointer;
+    padding: 4px;
+    opacity: 0.6;
+    transition: 0.2s;
+}
+
+.recoRemoveBtn:hover {
+    opacity: 1;
+    color: var(--c-danger);
+}
+
+/* Cart Footer */
+.recoCartSummary {
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(8px);
+    border-top: var(--glass-border);
+    flex-shrink: 0;
+}
+
+.recoCartRow {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 0.95rem;
+    color: var(--c-text-muted);
+}
+
+.recoCartRow.total {
+    color: var(--c-text-main);
+    font-weight: 800;
+    font-size: 1.2rem;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: var(--border-dashed);
+}
+
+/* Nút thanh toán: Đậm đà (Primary) */
+.recoCheckoutBtn {
+    width: 100%;
+    padding: 14px;
+    margin-top: 20px;
+    border-radius: var(--radius-md);
+    background: var(--c-primary);
+    /* Đen than */
+    color: white;
+    font-weight: 700;
+    font-size: 1rem;
+    border: 1px solid var(--c-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.2s;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.2);
+}
+
+.recoCheckoutBtn:hover:not(:disabled) {
+    background: #000;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.3);
+}
+
+.recoCheckoutBtn:disabled {
+    background: #cbd5e1;
+    border-color: #cbd5e1;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* --- UTILS --- */
+.flex {
+    display: flex;
+}
+
+.flex-col {
+    flex-direction: column;
+}
+
+.flex-1 {
+    flex: 1;
+}
+
+.items-center {
+    align-items: center;
+}
+
+.justify-between {
+    justify-content: space-between;
+}
+
+.justify-center {
+    justify-content: center;
+}
+
+.grid {
+    display: grid;
+}
+
+.gap-2 {
+    gap: 8px;
+}
+
+.gap-3 {
+    gap: 12px;
+}
+
+.gap-4 {
+    gap: 16px;
+}
+
+.text-right {
+    text-align: right;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.text-xs {
+    font-size: 0.75rem;
+}
+
+.text-sm {
+    font-size: 0.875rem;
+}
+
+.text-lg {
+    font-size: 1.125rem;
+}
+
+.text-xl {
+    font-size: 1.25rem;
+}
+
+.font-medium {
+    font-weight: 500;
+}
+
+.font-bold {
+    font-weight: 700;
+}
+
+.font-black {
+    font-weight: 900;
+}
+
+.m-0 {
+    margin: 0;
+}
+
+.mt-1 {
+    margin-top: 4px;
+}
+
+.mt-2 {
+    margin-top: 8px;
+}
+
+.mt-4 {
+    margin-top: 16px;
+}
+
+.mt-8 {
+    margin-top: 32px;
+}
+
+.mb-1 {
+    margin-bottom: 4px;
+}
+
+.mb-6 {
+    margin-bottom: 24px;
+}
+
+.p-0 {
+    padding: 0;
+}
+
+.p-3 {
+    padding: 12px;
+}
+
+.p-4 {
+    padding: 16px;
+}
+
+.p-6 {
+    padding: 24px;
+}
+
+.pt-0 {
+    padding-top: 0;
+}
+
+.pt-4 {
+    padding-top: 16px;
+}
+
+.space-y-2>*+* {
+    margin-top: 8px;
+}
+
+.space-y-3>*+* {
+    margin-top: 12px;
+}
+
+.space-y-4>*+* {
+    margin-top: 16px;
+}
+
+.rounded-lg {
+    border-radius: var(--radius-md);
+}
+
+.rounded-xl {
+    border-radius: var(--radius-lg);
+}
+
+.w-5 {
+    width: 20px;
+}
+
+.h-5 {
+    height: 20px;
+}
+
+.w-full {
+    width: 100%;
+}
+
+.mr-2 {
+    margin-right: 8px;
+}
+
+.border-none {
+    border: none;
+}
+
+.bg-transparent {
+    background: transparent;
+}
+
+.capitalize {
+    text-transform: capitalize;
+}
+
+.text-gray-500 {
+    color: #6b7280;
+}
+
+.text-blue-500 {
+    color: #3b82f6;
+}
+
+.text-blue-600 {
+    color: #2563eb;
+}
+
+.text-blue-800 {
+    color: #1e40af;
+}
+
+.text-green-600 {
+    color: #16a34a;
+}
+
+.text-orange-500 {
+    color: #f97316;
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.4s ease-out forwards;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Scrollbar mảnh đẹp */
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* ================= PRODUCT DETAIL POPUP ================= */
+
+/* Lớp phủ mờ riêng cho popup chi tiết (đè lên lớp cũ) */
+.recoDetailOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.2);
+    /* Mờ nhẹ hơn vì đã có lớp blur dưới */
+    backdrop-filter: blur(4px);
+    z-index: 10000;
+    /* Cao hơn recoOverlay cũ */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    animation: fadeIn 0.2s ease-out;
+}
+
+/* Khung nội dung popup */
+.recoDetailPanel {
+    width: 100%;
+    max-width: 900px;
+    background: #fff;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-float);
+    position: relative;
+
+    /* ĐỔI overflow: hidden THÀNH overflow-y: auto */
+    overflow-y: auto;
+    /* THÊM giới hạn chiều cao để popup không dài quá màn hình */
+    max-height: 90vh;
+
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.recoDetailClose {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(15, 23, 42, 0.05);
+    border: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    color: var(--c-text-main);
+    transition: all 0.2s;
+    list-style: none;
+}
+
+.recoDetailClose:hover {
+    background: rgba(15, 23, 42, 0.1);
+    transform: rotate(90deg);
+}
+
+/* Layout 2 cột: Ảnh - Thông tin */
+.recoDetailGrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 500px;
+}
+
+@media (max-width: 768px) {
+    .recoDetailGrid {
+        grid-template-columns: 1fr;
+        min-height: auto;
+    }
+}
+
+/* Cột Ảnh */
+.recoDetailImgCol {
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    border-right: var(--glass-border);
+}
+
+.recoDetailImgCol img {
+    max-width: 100%;
+    max-height: 400px;
+    object-fit: contain;
+    filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.1));
+    /* Đổ bóng cho vật thể trong ảnh */
+    transition: transform 0.3s;
+}
+
+.recoDetailImgCol img:hover {
+    transform: scale(1.05);
+}
+
+/* Cột Thông tin */
+.recoDetailInfoCol {
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.recoDetailCategory {
+    display: inline-block;
+    background: rgba(15, 23, 42, 0.05);
+    color: var(--c-text-muted);
+    padding: 4px 12px;
+    border-radius: 99px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+
+.recoDetailTitle {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--c-text-main);
+    margin: 0 0 16px 0;
+    line-height: 1.2;
+}
+
+.recoDetailPriceRow {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.recoDetailPriceRow .currentPrice {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--c-primary);
+}
+
+.recoDetailPriceRow .oldPrice {
+    font-size: 1.2rem;
+    color: var(--c-text-muted);
+    text-decoration: line-through;
+}
+
+.recoDetailDesc {
+    font-size: 1rem;
+    color: var(--c-text-muted);
+    line-height: 1.6;
+    margin-bottom: 32px;
+}
+
+.recoDetailMeta {
+    display: flex;
+    gap: 24px;
+    padding-top: 24px;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    margin-bottom: 32px;
+}
+
+.recoDetailMeta .metaItem {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.recoDetailMeta .label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--c-text-muted);
+    text-transform: uppercase;
+}
+
+.recoDetailMeta .value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--c-text-main);
+}
+
+/* Nút Action trong popup */
+.recoDetailAddBtn {
+    width: 100%;
+    padding: 16px;
+    background: var(--c-primary);
+    color: white;
+    font-size: 1.1rem;
+    font-weight: 700;
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: all 0.2s;
+    box-shadow: 0 4px 15px rgba(15, 23, 42, 0.2);
+}
+
+.recoDetailAddBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(15, 23, 42, 0.3);
+}
+
+/* For AI product recommendation */
+
+.ai-badge-container {
+    display: flex;
+    gap: 8px;
+    margin-top: 5px;
+}
+
+.ai-mini-badge {
+    background: rgba(255, 255, 255, 0.2);
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    color: white;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.ai-best-match {
+    background: linear-gradient(to right, #f59e0b, #ef4444) !important;
+    color: white !important;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ai-status-icon {
+    background: rgba(255, 255, 255, 0.2);
+    padding: 10px;
+    border-radius: 50%;
+    backdrop-filter: blur(4px);
+}
+
+/*Related Products*/
+
+/* Container chính của khu vực đề xuất */
+.related-products-section {
+    margin-top: 28px;
+    padding-top: 16px;
+    border-top: 1px solid #eee;
+    /* Đường kẻ phân cách nhẹ nhàng */
+}
+
+/* Tiêu đề "Thường được mua kèm" */
+.related-products-title {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    color: #333;
+}
+
+/* Danh sách sản phẩm (Hỗ trợ cuộn ngang - Horizontal Scroll) */
+.related-products-list {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    /* Cho phép cuộn ngang */
+    padding-bottom: 10px;
+    /* Khoảng trống cho thanh cuộn */
+    -webkit-overflow-scrolling: touch;
+    /* Cuộn mượt trên iOS */
+}
+
+/* Tùy chỉnh thanh cuộn cho gọn (Chỉ hiển thị trên Webkit/Chrome) */
+.related-products-list::-webkit-scrollbar {
+    height: 4px;
+    /* Thanh cuộn rất mảnh */
+}
+
+.related-products-list::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+}
+
+/* State đang tải hoặc rỗng */
+.related-products-status {
+    text-align: center;
+    color: #888;
+    font-size: 14px;
+    padding: 16px 0;
+}
+
+/* Thẻ sản phẩm liên quan */
+.related-product-card {
+    min-width: 125px;
+    /* Chiều rộng cố định để kích hoạt cuộn ngang */
+    max-width: 125px;
+    flex-shrink: 0;
+    /* Không cho phép co lại */
+    border: 1px solid #eaeaea;
+    border-radius: 8px;
+    padding: 8px;
+    cursor: pointer;
+    background: #fff;
+    transition: all 0.2s ease-in-out;
+    /* Hiệu ứng mượt mà */
+}
+
+/* Hiệu ứng khi di chuột vào thẻ */
+.related-product-card:hover {
+    border-color: #ddd;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    transform: translateY(-2px);
+    /* Nhấc nhẹ lên */
+}
+
+/* Hình ảnh sản phẩm */
+.related-product-image {
+    width: 100%;
+    height: 100px;
+    object-fit: cover;
+    /* Giữ tỷ lệ ảnh, cắt bớt nếu thừa */
+    border-radius: 4px;
+}
+
+/* Tên sản phẩm (Xử lý chữ quá dài) */
+.related-product-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #333;
+    margin-top: 8px;
+    margin-bottom: 0;
+    line-height: 1.4;
+
+    display: -webkit-box;
+    /* THÊM TIỀN TỐ -webkit- VÀO ĐÂY */
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    height: 36px;
+}
+
+/* Giá sản phẩm */
+.related-product-price {
+    color: #e53e3e;
+    /* Màu đỏ nổi bật */
+    font-weight: 700;
+    font-size: 14px;
+    margin-top: 4px;
+    margin-bottom: 0;
+}

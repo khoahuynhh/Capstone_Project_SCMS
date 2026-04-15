@@ -1,75 +1,112 @@
 {
-  "dashboard": {
-    "title": "Edge AI Retail - System Overview",
-    "tags": ["edge-ai", "retail", "federated-learning"],
-    "timezone": "browser",
-    "panels": [
-      {
-        "id": 1,
-        "title": "Total Transactions (24h)",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "sum(increase(edge_transactions_total[24h]))"
-          }
-        ],
-        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+  "uid": "edge-ai-retail-overview",
+  "title": "Edge AI Retail - System Overview",
+  "tags": ["edge-ai", "retail", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Inference Requests (24h)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      {
-        "id": 2,
-        "title": "Recommendation Acceptance Rate",
-        "type": "gauge",
-        "targets": [
-          {
-            "expr": "sum(edge_recommendations_accepted) / sum(edge_recommendations_total) * 100"
-          }
-        ],
-        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      "targets": [
+        {
+          "expr": "sum(increase(edge_inference_total[24h]))",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "Recommendations (24h)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      {
-        "id": 3,
-        "title": "Inference Latency (p95)",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, edge_inference_latency_seconds)"
-          }
-        ],
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      "targets": [
+        {
+          "expr": "sum(increase(edge_recommendations_total[24h]))",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Inference Latency p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      {
-        "id": 4,
-        "title": "Active Branches",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "count(count by (branch_id) (edge_inference_total))"
-          }
-        ],
-        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(edge_inference_latency_seconds_bucket[5m])) by (le))",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+    },
+    {
+      "id": 4,
+      "title": "Active Edge Devices",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      {
-        "id": 5,
-        "title": "Model Performance by Branch",
-        "type": "table",
-        "targets": [
-          {
-            "expr": "edge_model_accuracy{model_type='recommender'}"
-          }
-        ],
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      "targets": [
+        {
+          "expr": "count(up{job=~\"edge-device-.*\"} == 1)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+    },
+    {
+      "id": 5,
+      "title": "MQTT Publishes (24h)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      {
-        "id": 6,
-        "title": "Federated Learning Rounds",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "federated_learning_round_number"
-          }
-        ],
-        "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12}
-      }
-    ]
-  }
+      "targets": [
+        {
+          "expr": "sum(increase(edge_mqtt_publish_total[24h]))",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+    },
+    {
+      "id": 6,
+      "title": "Scrape Health",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "up{job=~\"cloud-server|edge-device-.*|prometheus\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+    }
+  ]
 }

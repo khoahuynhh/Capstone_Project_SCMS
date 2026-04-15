@@ -2,19 +2,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.models import Base
 from config import settings
-
-import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Database URL from environment
-DATABASE_URL = settings.DATABASE_URL or os.getenv(
-    "DATABASE_URL",
-)
+# Database URL from settings (loads from .env via pydantic_settings)
+DATABASE_URL = settings.DATABASE_URL
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set")
-print(">>> DATABASE_URL =", DATABASE_URL)
+    raise RuntimeError("DATABASE_URL is not set (set env or be/.env)")
 
 # Create engine
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)

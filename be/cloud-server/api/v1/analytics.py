@@ -1,20 +1,33 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import List, Optional
-from datetime import datetime, timedelta
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta, date
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, cast, Date, Integer, case, desc
+from fastapi.concurrency import run_in_threadpool
+
 from database.db import SessionLocal
 from database.models import (
-    Transaction, Recommendation, BranchMetrics, 
-    ModelPerformanceLog, InventoryOptimization
+    Store,
+    Product,
+    Transaction,
+    TransactionItem,
+    Recommendation,
+    Customer,
+    CustomerStats,
+    BranchInventory,
+    EdgeDevice,
+    FaceEvent,
 )
-import logging
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 
+
+# =========================
+# DB Dependency
+# =========================
 def get_db():
     db = SessionLocal()
     try:
@@ -22,330 +35,816 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic models
-class CTRMetrics(BaseModel):
-    period: str
-    total_recommendations: int
-    total_clicks: int
-    total_conversions: int
-    ctr: float
-    conversion_rate: float
-    by_branch: List[dict]
 
-class InventoryRecommendation(BaseModel):
-    product_id: str
+# =========================
+# Helpers
+# =========================
+def to_float(value):
+    if value is None:
+        return 0.0
+    if isinstance(value, Decimal):
+        return float(value)
+    return float(value)
+
+
+def pct_change(current: float, previous: float) -> float:
+    if previous == 0:
+        return 0.0 if current == 0 else 100.0
+    return round(((current - previous) / previous) * 100, 2)
+
+
+def safe_div(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return round(numerator / denominator, 4)
+
+
+# =========================
+# Response Schemas
+# =========================
+class KPIItem(BaseModel):
+    value: float
+    change_pct: float = 0.0
+
+
+class OverviewKPIs(BaseModel):
+    revenue: KPIItem
+    transactions: KPIItem
+    avg_order_value: KPIItem
+    unique_customers: KPIItem
+    recommendation_ctr: KPIItem
+    recommendation_acceptance_rate: KPIItem
+    foot_traffic: KPIItem
+    conversion_rate: KPIItem
+
+
+class RevenuePoint(BaseModel):
+    date: str
+    revenue: float
+    transactions: int
+    avg_order_value: float
+
+
+class BranchPerformanceItem(BaseModel):
     branch_id: str
-    action: str  # restock, transfer, markdown
-    quantity: int
-    reason: str
-    priority: str  # high, medium, low
+    branch_name: Optional[str] = None
+    revenue: float
+    transactions: int
+    avg_order_value: float
+    unique_customers: int
+    foot_traffic: int
+    conversion_rate: float
 
-# ============ Analytics Endpoints ============
 
-@router.get("/ctr", response_model=CTRMetrics)
-async def get_ctr_metrics(
-    days: int = Query(7, ge=1, le=90),
-    branch_id: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Get Click-Through Rate and conversion metrics"""
-    from fastapi.concurrency import run_in_threadpool
-    
-    def query_metrics():
-        start_date = datetime.now() - timedelta(days=days)
-        
-        # Query recommendations
-        rec_query = db.query(Recommendation).filter(
-            Recommendation.timestamp >= start_date
+class TopProductItem(BaseModel):
+    product_id: int
+    product_name: str
+    category: Optional[str] = None
+    quantity_sold: int
+    revenue: float
+
+
+class CategoryBreakdownItem(BaseModel):
+    category: str
+    revenue: float
+    quantity_sold: int
+
+
+class CustomerSegmentItem(BaseModel):
+    segment: str
+    customers: int
+
+
+class InventoryAlertItem(BaseModel):
+    branch_id: str
+    branch_name: Optional[str] = None
+    product_id: int
+    product_name: str
+    stock: int
+    reserved: int
+    available: int
+    status: str
+
+
+class RecommendationSummary(BaseModel):
+    total_recommendations: int
+    total_accepted: int
+    acceptance_rate: float
+
+
+class DeviceStatusSummary(BaseModel):
+    total_devices: int
+    active_devices: int
+    offline_devices: int
+    error_devices: int
+
+
+class DashboardOverviewResponse(BaseModel):
+    period_days: int
+    branch_id: Optional[str] = None
+    generated_at: str
+    kpis: OverviewKPIs
+    revenue_trend: List[RevenuePoint]
+    branch_performance: List[BranchPerformanceItem]
+    top_products: List[TopProductItem]
+    category_breakdown: List[CategoryBreakdownItem]
+    customer_segments: List[CustomerSegmentItem]
+    inventory_alerts: List[InventoryAlertItem]
+    recommendation_summary: RecommendationSummary
+    device_status: DeviceStatusSummary
+
+
+# =========================
+# Core Query Builder
+# =========================
+def _get_dashboard_data(
+    db: Session, days: int, branch_id: Optional[str]
+) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    start_date = now - timedelta(days=days)
+    prev_start_date = start_date - timedelta(days=days)
+
+    # -------------------------
+    # Base filters
+    # -------------------------
+    current_txn_filter = [Transaction.timestamp >= start_date]
+    prev_txn_filter = [
+        Transaction.timestamp >= prev_start_date,
+        Transaction.timestamp < start_date,
+    ]
+
+    current_rec_filter = [Recommendation.timestamp >= start_date]
+    prev_rec_filter = [
+        Recommendation.timestamp >= prev_start_date,
+        Recommendation.timestamp < start_date,
+    ]
+
+    current_face_filter = [FaceEvent.timestamp >= start_date]
+    prev_face_filter = [
+        FaceEvent.timestamp >= prev_start_date,
+        FaceEvent.timestamp < start_date,
+    ]
+
+    current_device_filter = []
+    if branch_id:
+        current_txn_filter.append(Transaction.branch_id == branch_id)
+        prev_txn_filter.append(Transaction.branch_id == branch_id)
+
+        current_rec_filter.append(Recommendation.branch_id == branch_id)
+        prev_rec_filter.append(Recommendation.branch_id == branch_id)
+
+        current_face_filter.append(FaceEvent.branch_id == branch_id)
+        prev_face_filter.append(FaceEvent.branch_id == branch_id)
+
+        current_device_filter.append(EdgeDevice.branch_id == branch_id)
+
+    # -------------------------
+    # KPI - Current period
+    # -------------------------
+    current_txn_stats = (
+        db.query(
+            func.coalesce(func.sum(Transaction.total_amount), 0.0),
+            func.count(Transaction.id),
+            func.count(func.distinct(Transaction.customer_id)),
         )
-        
-        if branch_id:
-            rec_query = rec_query.filter(Recommendation.branch_id == branch_id)
-        
-        recommendations = rec_query.all()
-        
-        total_recs = len(recommendations)
-        total_accepted = sum(1 for r in recommendations if r.accepted)
-        
-        # Query transactions to count conversions
-        txn_query = db.query(Transaction).filter(
-            Transaction.timestamp >= start_date
+        .filter(*current_txn_filter)
+        .one()
+    )
+
+    current_revenue = to_float(current_txn_stats[0])
+    current_transactions = int(current_txn_stats[1] or 0)
+    current_unique_customers = int(current_txn_stats[2] or 0)
+    current_aov = safe_div(current_revenue, current_transactions)
+
+    prev_txn_stats = (
+        db.query(
+            func.coalesce(func.sum(Transaction.total_amount), 0.0),
+            func.count(Transaction.id),
+            func.count(func.distinct(Transaction.customer_id)),
         )
-        
-        if branch_id:
-            txn_query = txn_query.filter(Transaction.branch_id == branch_id)
-        
-        transactions = txn_query.all()
-        
-        # Calculate by branch
-        if not branch_id:
-            branch_stats = db.query(
-                Recommendation.branch_id,
-                func.count(Recommendation.id).label('total'),
-                func.sum(func.cast(Recommendation.accepted, func.Integer)).label('accepted')
-            ).filter(
-                Recommendation.timestamp >= start_date
-            ).group_by(Recommendation.branch_id).all()
-            
-            by_branch = [
-                {
-                    "branch_id": stat[0],
-                    "total_recommendations": stat[1],
-                    "accepted": stat[2] or 0,
-                    "ctr": (stat[2] or 0) / stat[1] * 100 if stat[1] > 0 else 0
-                }
-                for stat in branch_stats
-            ]
-        else:
-            by_branch = []
-        
-        return {
-            "period": f"{days}d",
-            "total_recommendations": total_recs,
-            "total_clicks": total_accepted,
-            "total_conversions": len(transactions),
-            "ctr": (total_accepted / total_recs * 100) if total_recs > 0 else 0,
-            "conversion_rate": (len(transactions) / total_recs * 100) if total_recs > 0 else 0,
-            "by_branch": by_branch
+        .filter(*prev_txn_filter)
+        .one()
+    )
+
+    prev_revenue = to_float(prev_txn_stats[0])
+    prev_transactions = int(prev_txn_stats[1] or 0)
+    prev_unique_customers = int(prev_txn_stats[2] or 0)
+    prev_aov = safe_div(prev_revenue, prev_transactions)
+
+    # -------------------------
+    # Recommendation KPIs
+    # -------------------------
+    current_rec_stats = (
+        db.query(
+            func.count(Recommendation.id),
+            func.coalesce(func.sum(cast(Recommendation.accepted, Integer)), 0),
+        )
+        .filter(*current_rec_filter)
+        .one()
+    )
+
+    prev_rec_stats = (
+        db.query(
+            func.count(Recommendation.id),
+            func.coalesce(func.sum(cast(Recommendation.accepted, Integer)), 0),
+        )
+        .filter(*prev_rec_filter)
+        .one()
+    )
+
+    current_total_recs = int(current_rec_stats[0] or 0)
+    current_total_accepted = int(current_rec_stats[1] or 0)
+    current_acceptance_rate = round(
+        safe_div(current_total_accepted, current_total_recs) * 100, 2
+    )
+
+    prev_total_recs = int(prev_rec_stats[0] or 0)
+    prev_total_accepted = int(prev_rec_stats[1] or 0)
+    prev_acceptance_rate = round(
+        safe_div(prev_total_accepted, prev_total_recs) * 100, 2
+    )
+
+    # CTR business proxy:
+    # accepted recommendation / total recommendation
+    current_ctr = current_acceptance_rate
+    prev_ctr = prev_acceptance_rate
+
+    # -------------------------
+    # Foot traffic & conversion
+    # -------------------------
+    current_foot_traffic = (
+        db.query(func.count(FaceEvent.id)).filter(*current_face_filter).scalar() or 0
+    )
+    prev_foot_traffic = (
+        db.query(func.count(FaceEvent.id)).filter(*prev_face_filter).scalar() or 0
+    )
+
+    current_conversion_rate = round(
+        safe_div(current_transactions, current_foot_traffic) * 100, 2
+    )
+    prev_conversion_rate = round(
+        safe_div(int(prev_transactions), int(prev_foot_traffic)) * 100, 2
+    )
+
+    # -------------------------
+    # Revenue trend
+    # -------------------------
+    revenue_rows = (
+        db.query(
+            cast(Transaction.timestamp, Date).label("day"),
+            func.coalesce(func.sum(Transaction.total_amount), 0.0).label("revenue"),
+            func.count(Transaction.id).label("transactions"),
+        )
+        .filter(*current_txn_filter)
+        .group_by(cast(Transaction.timestamp, Date))
+        .order_by(cast(Transaction.timestamp, Date))
+        .all()
+    )
+
+    revenue_trend = [
+        RevenuePoint(
+            date=row.day.isoformat(),
+            revenue=round(to_float(row.revenue), 2),
+            transactions=int(row.transactions or 0),
+            avg_order_value=round(
+                safe_div(to_float(row.revenue), int(row.transactions or 0)), 2
+            ),
+        )
+        for row in revenue_rows
+    ]
+
+    # -------------------------
+    # Branch performance
+    # -------------------------
+    branch_performance = []
+    if not branch_id:
+        branch_rows = (
+            db.query(
+                Store.id.label("branch_id"),
+                Store.name.label("branch_name"),
+                func.coalesce(func.sum(Transaction.total_amount), 0.0).label("revenue"),
+                func.count(Transaction.id).label("transactions"),
+                func.count(func.distinct(Transaction.customer_id)).label(
+                    "unique_customers"
+                ),
+            )
+            .outerjoin(Transaction, Transaction.branch_id == Store.id)
+            .filter((Transaction.timestamp >= start_date) | (Transaction.id.is_(None)))
+            .group_by(Store.id, Store.name)
+            .order_by(desc("revenue"))
+            .all()
+        )
+
+        foot_traffic_map = {
+            row.branch_id: int(row.foot_traffic or 0)
+            for row in (
+                db.query(
+                    FaceEvent.branch_id.label("branch_id"),
+                    func.count(FaceEvent.id).label("foot_traffic"),
+                )
+                .filter(*current_face_filter)
+                .group_by(FaceEvent.branch_id)
+                .all()
+            )
         }
-    
-    metrics = await run_in_threadpool(query_metrics)
-    return metrics
 
+        for row in branch_rows:
+            revenue = round(to_float(row.revenue), 2)
+            txns = int(row.transactions or 0)
+            foot = foot_traffic_map.get(row.branch_id, 0)
+            branch_performance.append(
+                BranchPerformanceItem(
+                    branch_id=row.branch_id,
+                    branch_name=row.branch_name,
+                    revenue=revenue,
+                    transactions=txns,
+                    avg_order_value=round(safe_div(revenue, txns), 2),
+                    unique_customers=int(row.unique_customers or 0),
+                    foot_traffic=foot,
+                    conversion_rate=round(safe_div(txns, foot) * 100, 2),
+                )
+            )
 
-@router.get("/inventory-optimization", response_model=List[InventoryRecommendation])
-async def get_inventory_recommendations(
-    branch_id: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Get inventory optimization recommendations"""
-    from fastapi.concurrency import run_in_threadpool
-    
-    def analyze_inventory():
-        # Get recent transactions
-        start_date = datetime.now() - timedelta(days=30)
-        
-        query = db.query(Transaction).filter(
-            Transaction.timestamp >= start_date
+    # -------------------------
+    # Top products
+    # -------------------------
+    top_product_query = (
+        db.query(
+            Product.id.label("product_id"),
+            Product.name.label("product_name"),
+            Product.category.label("category"),
+            func.coalesce(func.sum(TransactionItem.qty), 0).label("quantity_sold"),
+            func.coalesce(
+                func.sum(TransactionItem.qty * TransactionItem.unit_price), 0.0
+            ).label("revenue"),
         )
-        
-        if branch_id:
-            query = query.filter(Transaction.branch_id == branch_id)
-        
-        transactions = query.all()
-        
-        # Analyze product sales velocity
-        product_sales = {}
-        for txn in transactions:
-            if txn.items_data:
-                import json
-                try:
-                    items = json.loads(txn.items_data) if isinstance(txn.items_data, str) else txn.items_data
-                    for item in items:
-                        pid = item.get('product_id', 'unknown')
-                        bid = txn.branch_id
-                        key = f"{bid}_{pid}"
-                        
-                        if key not in product_sales:
-                            product_sales[key] = {
-                                'branch_id': bid,
-                                'product_id': pid,
-                                'quantity': 0
-                            }
-                        product_sales[key]['quantity'] += 1
-                except:
-                    continue
-        
-        # Generate recommendations (simplified logic)
-        recommendations = []
-        
-        for key, data in product_sales.items():
-            velocity = data['quantity'] / 30  # items per day
-            
-            if velocity > 5:  # High demand
-                recommendations.append(InventoryRecommendation(
-                    product_id=data['product_id'],
-                    branch_id=data['branch_id'],
-                    action='restock',
-                    quantity=int(velocity * 14),  # 2 weeks supply
-                    reason=f'High demand: {velocity:.1f} units/day',
-                    priority='high'
-                ))
-            elif velocity < 0.5:  # Low demand
-                recommendations.append(InventoryRecommendation(
-                    product_id=data['product_id'],
-                    branch_id=data['branch_id'],
-                    action='markdown',
-                    quantity=int(velocity * 7),
-                    reason=f'Low demand: {velocity:.1f} units/day',
-                    priority='low'
-                ))
-        
-        return recommendations[:20]  # Top 20
-    
-    recs = await run_in_threadpool(analyze_inventory)
-    return recs
+        .join(TransactionItem, TransactionItem.product_id == Product.id)
+        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+        .filter(*current_txn_filter)
+    )
+
+    top_product_rows = (
+        top_product_query.group_by(Product.id, Product.name, Product.category)
+        .order_by(desc("quantity_sold"), desc("revenue"))
+        .limit(10)
+        .all()
+    )
+
+    top_products = [
+        TopProductItem(
+            product_id=row.product_id,
+            product_name=row.product_name,
+            category=row.category,
+            quantity_sold=int(row.quantity_sold or 0),
+            revenue=round(to_float(row.revenue), 2),
+        )
+        for row in top_product_rows
+    ]
+
+    # -------------------------
+    # Category breakdown
+    # -------------------------
+    category_rows = (
+        db.query(
+            Product.category.label("category"),
+            func.coalesce(func.sum(TransactionItem.qty), 0).label("quantity_sold"),
+            func.coalesce(
+                func.sum(TransactionItem.qty * TransactionItem.unit_price), 0.0
+            ).label("revenue"),
+        )
+        .join(TransactionItem, TransactionItem.product_id == Product.id)
+        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+        .filter(*current_txn_filter)
+        .group_by(Product.category)
+        .order_by(desc("revenue"))
+        .all()
+    )
+
+    category_breakdown = [
+        CategoryBreakdownItem(
+            category=row.category or "Unknown",
+            revenue=round(to_float(row.revenue), 2),
+            quantity_sold=int(row.quantity_sold or 0),
+        )
+        for row in category_rows
+    ]
+
+    # -------------------------
+    # Customer segments
+    # -------------------------
+    customer_segment_query = db.query(
+        CustomerStats.segment,
+        func.count(CustomerStats.id).label("customers"),
+    ).join(Customer, Customer.id == CustomerStats.customer_id)
+
+    if branch_id:
+        customer_segment_query = customer_segment_query.filter(
+            Customer.preferred_branch == branch_id
+        )
+
+    customer_segment_rows = (
+        customer_segment_query.group_by(CustomerStats.segment)
+        .order_by(desc("customers"))
+        .all()
+    )
+
+    customer_segments = [
+        CustomerSegmentItem(
+            segment=row.segment or "Unclassified",
+            customers=int(row.customers or 0),
+        )
+        for row in customer_segment_rows
+    ]
+
+    # -------------------------
+    # Inventory alerts
+    # -------------------------
+    inventory_query = (
+        db.query(
+            BranchInventory.branch_id,
+            Store.name.label("branch_name"),
+            BranchInventory.product_id,
+            Product.name.label("product_name"),
+            BranchInventory.stock,
+            BranchInventory.reserved,
+            (BranchInventory.stock - BranchInventory.reserved).label("available"),
+            case(
+                (
+                    (BranchInventory.stock - BranchInventory.reserved) <= 0,
+                    "out_of_stock",
+                ),
+                ((BranchInventory.stock - BranchInventory.reserved) <= 5, "low_stock"),
+                else_="ok",
+            ).label("status"),
+        )
+        .join(Store, Store.id == BranchInventory.branch_id)
+        .join(Product, Product.id == BranchInventory.product_id)
+    )
+
+    if branch_id:
+        inventory_query = inventory_query.filter(BranchInventory.branch_id == branch_id)
+
+    inventory_rows = (
+        inventory_query.filter((BranchInventory.stock - BranchInventory.reserved) <= 5)
+        .order_by(BranchInventory.branch_id, "available", BranchInventory.stock)
+        .limit(20)
+        .all()
+    )
+
+    inventory_alerts = [
+        InventoryAlertItem(
+            branch_id=row.branch_id,
+            branch_name=row.branch_name,
+            product_id=row.product_id,
+            product_name=row.product_name,
+            stock=int(row.stock or 0),
+            reserved=int(row.reserved or 0),
+            available=int(row.available or 0),
+            status=row.status,
+        )
+        for row in inventory_rows
+    ]
+
+    # -------------------------
+    # Device status
+    # -------------------------
+    device_rows = (
+        db.query(
+            func.count(EdgeDevice.id).label("total"),
+            func.coalesce(
+                func.sum(case((EdgeDevice.status == "active", 1), else_=0)), 0
+            ).label("active"),
+            func.coalesce(
+                func.sum(case((EdgeDevice.status == "offline", 1), else_=0)), 0
+            ).label("offline"),
+            func.coalesce(
+                func.sum(case((EdgeDevice.status == "error", 1), else_=0)), 0
+            ).label("error"),
+        )
+        .filter(*current_device_filter)
+        .one()
+    )
+
+    device_status = DeviceStatusSummary(
+        total_devices=int(device_rows.total or 0),
+        active_devices=int(device_rows.active or 0),
+        offline_devices=int(device_rows.offline or 0),
+        error_devices=int(device_rows.error or 0),
+    )
+
+    # -------------------------
+    # Final response
+    # -------------------------
+    return DashboardOverviewResponse(
+        period_days=days,
+        branch_id=branch_id,
+        generated_at=now.isoformat(),
+        kpis=OverviewKPIs(
+            revenue=KPIItem(
+                value=round(current_revenue, 2),
+                change_pct=pct_change(current_revenue, prev_revenue),
+            ),
+            transactions=KPIItem(
+                value=current_transactions,
+                change_pct=pct_change(current_transactions, prev_transactions),
+            ),
+            avg_order_value=KPIItem(
+                value=round(current_aov, 2),
+                change_pct=pct_change(current_aov, prev_aov),
+            ),
+            unique_customers=KPIItem(
+                value=current_unique_customers,
+                change_pct=pct_change(current_unique_customers, prev_unique_customers),
+            ),
+            recommendation_ctr=KPIItem(
+                value=current_ctr,
+                change_pct=pct_change(current_ctr, prev_ctr),
+            ),
+            recommendation_acceptance_rate=KPIItem(
+                value=current_acceptance_rate,
+                change_pct=pct_change(current_acceptance_rate, prev_acceptance_rate),
+            ),
+            foot_traffic=KPIItem(
+                value=current_foot_traffic,
+                change_pct=pct_change(current_foot_traffic, prev_foot_traffic),
+            ),
+            conversion_rate=KPIItem(
+                value=current_conversion_rate,
+                change_pct=pct_change(current_conversion_rate, prev_conversion_rate),
+            ),
+        ),
+        revenue_trend=revenue_trend,
+        branch_performance=branch_performance,
+        top_products=top_products,
+        category_breakdown=category_breakdown,
+        customer_segments=customer_segments,
+        inventory_alerts=inventory_alerts,
+        recommendation_summary=RecommendationSummary(
+            total_recommendations=current_total_recs,
+            total_accepted=current_total_accepted,
+            acceptance_rate=current_acceptance_rate,
+        ),
+        device_status=device_status,
+    )
 
 
-@router.get("/model-performance")
-async def get_model_performance(
-    model_version: str,
-    days: int = Query(7, ge=1, le=90),
-    db: Session = Depends(get_db)
+# =========================
+# Endpoints
+# =========================
+@router.get("/dashboard/overview", response_model=DashboardOverviewResponse)
+async def get_dashboard_overview(
+    days: int = Query(7, ge=1, le=365),
+    branch_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
 ):
-    """Get model performance metrics over time"""
-    from fastapi.concurrency import run_in_threadpool
-    
-    def query_performance():
-        start_date = datetime.now() - timedelta(days=days)
-        
-        logs = db.query(ModelPerformanceLog).filter(
-            ModelPerformanceLog.model_version == model_version,
-            ModelPerformanceLog.date >= start_date
-        ).order_by(ModelPerformanceLog.date).all()
-        
-        if not logs:
-            return {
-                "model_version": model_version,
-                "period": f"{days}d",
-                "metrics": []
-            }
-        
-        metrics = [
+    """
+    API tổng hợp cho dashboard tổng quan kinh doanh.
+    FE chỉ cần gọi 1 endpoint này để dựng:
+    - KPI cards
+    - revenue line chart
+    - branch ranking
+    - top products
+    - category pie/bar chart
+    - customer segments
+    - inventory alerts
+    - device status
+    """
+    return await run_in_threadpool(_get_dashboard_data, db, days, branch_id)
+
+
+@router.get("/dashboard/revenue-trend")
+async def get_revenue_trend(
+    days: int = Query(30, ge=1, le=365),
+    branch_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    query = db.query(
+        cast(Transaction.timestamp, Date).label("day"),
+        func.coalesce(func.sum(Transaction.total_amount), 0.0).label("revenue"),
+        func.count(Transaction.id).label("transactions"),
+    ).filter(Transaction.timestamp >= start_date)
+
+    if branch_id:
+        query = query.filter(Transaction.branch_id == branch_id)
+
+    rows = (
+        query.group_by(cast(Transaction.timestamp, Date))
+        .order_by(cast(Transaction.timestamp, Date))
+        .all()
+    )
+
+    return {
+        "period_days": days,
+        "branch_id": branch_id,
+        "data": [
             {
-                "date": log.date.isoformat(),
-                "branch_id": log.branch_id,
-                "precision_at_5": log.precision_at_5,
-                "recall_at_5": log.recall_at_5,
-                "ndcg_at_5": log.ndcg_at_5,
-                "ctr": log.ctr,
-                "avg_latency_ms": log.avg_latency_ms,
-                "p95_latency_ms": log.p95_latency_ms
+                "date": row.day.isoformat(),
+                "revenue": round(to_float(row.revenue), 2),
+                "transactions": int(row.transactions or 0),
+                "avg_order_value": round(
+                    safe_div(to_float(row.revenue), int(row.transactions or 0)), 2
+                ),
             }
-            for log in logs
-        ]
-        
-        # Calculate averages
-        avg_precision = sum(m['precision_at_5'] for m in metrics if m['precision_at_5']) / len(metrics)
-        avg_latency = sum(m['avg_latency_ms'] for m in metrics if m['avg_latency_ms']) / len(metrics)
-        
-        return {
-            "model_version": model_version,
-            "period": f"{days}d",
-            "avg_precision_at_5": avg_precision,
-            "avg_latency_ms": avg_latency,
-            "metrics": metrics
-        }
-    
-    performance = await run_in_threadpool(query_performance)
-    return performance
+            for row in rows
+        ],
+    }
 
 
-@router.get("/demand-forecast")
-async def get_demand_forecast(
-    branch_id: str,
-    days_ahead: int = Query(7, ge=1, le=30),
-    db: Session = Depends(get_db)
-):
-    """Get demand forecast for products (simplified linear projection)"""
-    from fastapi.concurrency import run_in_threadpool
-    
-    def forecast():
-        # Get historical data
-        start_date = datetime.now() - timedelta(days=30)
-        
-        transactions = db.query(Transaction).filter(
-            Transaction.branch_id == branch_id,
-            Transaction.timestamp >= start_date
-        ).all()
-        
-        # Calculate daily sales
-        daily_sales = {}
-        for txn in transactions:
-            date_key = txn.timestamp.date().isoformat()
-            if date_key not in daily_sales:
-                daily_sales[date_key] = 0
-            daily_sales[date_key] += txn.total_amount or 0
-        
-        # Simple moving average forecast
-        if daily_sales:
-            avg_daily_revenue = sum(daily_sales.values()) / len(daily_sales)
-            forecasted_revenue = avg_daily_revenue * days_ahead
-        else:
-            avg_daily_revenue = 0
-            forecasted_revenue = 0
-        
-        return {
-            "branch_id": branch_id,
-            "forecast_period_days": days_ahead,
-            "historical_daily_avg": avg_daily_revenue,
-            "forecasted_total_revenue": forecasted_revenue,
-            "confidence": "low",  # Placeholder
-            "method": "moving_average"
-        }
-    
-    forecast_data = await run_in_threadpool(forecast)
-    return forecast_data
-
-
-@router.get("/top-products")
+@router.get("/dashboard/top-products")
 async def get_top_products(
-    branch_id: Optional[str] = None,
-    days: int = Query(7, ge=1, le=90),
-    limit: int = Query(10, le=50),
-    db: Session = Depends(get_db)
+    days: int = Query(30, ge=1, le=365),
+    branch_id: Optional[str] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
 ):
-    """Get top selling products"""
-    from fastapi.concurrency import run_in_threadpool
-    
-    def query_top_products():
-        start_date = datetime.now() - timedelta(days=days)
-        
-        query = db.query(Transaction).filter(
-            Transaction.timestamp >= start_date
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    query = (
+        db.query(
+            Product.id.label("product_id"),
+            Product.name.label("product_name"),
+            Product.category.label("category"),
+            func.coalesce(func.sum(TransactionItem.qty), 0).label("quantity_sold"),
+            func.coalesce(
+                func.sum(TransactionItem.qty * TransactionItem.unit_price), 0.0
+            ).label("revenue"),
         )
-        
-        if branch_id:
-            query = query.filter(Transaction.branch_id == branch_id)
-        
-        transactions = query.all()
-        
-        # Count product sales
-        product_counts = {}
-        for txn in transactions:
-            if txn.items_data:
-                import json
-                try:
-                    items = json.loads(txn.items_data) if isinstance(txn.items_data, str) else txn.items_data
-                    for item in items:
-                        pid = item.get('product_id', 'unknown')
-                        pname = item.get('product_name', pid)
-                        
-                        if pid not in product_counts:
-                            product_counts[pid] = {
-                                'product_id': pid,
-                                'product_name': pname,
-                                'quantity_sold': 0,
-                                'revenue': 0
-                            }
-                        
-                        product_counts[pid]['quantity_sold'] += 1
-                        product_counts[pid]['revenue'] += item.get('price', 0)
-                except:
-                    continue
-        
-        # Sort by quantity
-        top_products = sorted(
-            product_counts.values(),
-            key=lambda x: x['quantity_sold'],
-            reverse=True
-        )[:limit]
-        
-        return {
-            "period": f"{days}d",
-            "branch_id": branch_id or "all",
-            "products": top_products
-        }
-    
-    result = await run_in_threadpool(query_top_products)
-    return result
+        .join(TransactionItem, TransactionItem.product_id == Product.id)
+        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+        .filter(Transaction.timestamp >= start_date)
+    )
+
+    if branch_id:
+        query = query.filter(Transaction.branch_id == branch_id)
+
+    rows = (
+        query.group_by(Product.id, Product.name, Product.category)
+        .order_by(desc("quantity_sold"), desc("revenue"))
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "period_days": days,
+        "branch_id": branch_id,
+        "items": [
+            {
+                "product_id": row.product_id,
+                "product_name": row.product_name,
+                "category": row.category,
+                "quantity_sold": int(row.quantity_sold or 0),
+                "revenue": round(to_float(row.revenue), 2),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/dashboard/branch-performance")
+async def get_branch_performance(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    start_date = datetime.utcnow() - timedelta(days=days)
+
+    branch_rows = (
+        db.query(
+            Store.id.label("branch_id"),
+            Store.name.label("branch_name"),
+            func.coalesce(func.sum(Transaction.total_amount), 0.0).label("revenue"),
+            func.count(Transaction.id).label("transactions"),
+            func.count(func.distinct(Transaction.customer_id)).label(
+                "unique_customers"
+            ),
+        )
+        .outerjoin(Transaction, Transaction.branch_id == Store.id)
+        .filter((Transaction.timestamp >= start_date) | (Transaction.id.is_(None)))
+        .group_by(Store.id, Store.name)
+        .order_by(desc("revenue"))
+        .all()
+    )
+
+    foot_traffic_map = {
+        row.branch_id: int(row.foot_traffic or 0)
+        for row in (
+            db.query(
+                FaceEvent.branch_id.label("branch_id"),
+                func.count(FaceEvent.id).label("foot_traffic"),
+            )
+            .filter(FaceEvent.timestamp >= start_date)
+            .group_by(FaceEvent.branch_id)
+            .all()
+        )
+    }
+
+    return {
+        "period_days": days,
+        "items": [
+            {
+                "branch_id": row.branch_id,
+                "branch_name": row.branch_name,
+                "revenue": round(to_float(row.revenue), 2),
+                "transactions": int(row.transactions or 0),
+                "avg_order_value": round(
+                    safe_div(to_float(row.revenue), int(row.transactions or 0)), 2
+                ),
+                "unique_customers": int(row.unique_customers or 0),
+                "foot_traffic": foot_traffic_map.get(row.branch_id, 0),
+                "conversion_rate": round(
+                    safe_div(
+                        int(row.transactions or 0),
+                        foot_traffic_map.get(row.branch_id, 0),
+                    )
+                    * 100,
+                    2,
+                ),
+            }
+            for row in branch_rows
+        ],
+    }
+
+
+@router.get("/dashboard/inventory-alerts")
+async def get_inventory_alerts(
+    branch_id: Optional[str] = Query(None),
+    threshold: int = Query(5, ge=0, le=100),
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(
+            BranchInventory.branch_id,
+            Store.name.label("branch_name"),
+            BranchInventory.product_id,
+            Product.name.label("product_name"),
+            BranchInventory.stock,
+            BranchInventory.reserved,
+            (BranchInventory.stock - BranchInventory.reserved).label("available"),
+            case(
+                (
+                    (BranchInventory.stock - BranchInventory.reserved) <= 0,
+                    "out_of_stock",
+                ),
+                (
+                    (BranchInventory.stock - BranchInventory.reserved) <= threshold,
+                    "low_stock",
+                ),
+                else_="ok",
+            ).label("status"),
+        )
+        .join(Store, Store.id == BranchInventory.branch_id)
+        .join(Product, Product.id == BranchInventory.product_id)
+        .filter((BranchInventory.stock - BranchInventory.reserved) <= threshold)
+        .order_by(BranchInventory.branch_id, "available", BranchInventory.stock)
+    )
+
+    if branch_id:
+        query = query.filter(BranchInventory.branch_id == branch_id)
+
+    rows = query.all()
+
+    return {
+        "branch_id": branch_id,
+        "threshold": threshold,
+        "items": [
+            {
+                "branch_id": row.branch_id,
+                "branch_name": row.branch_name,
+                "product_id": row.product_id,
+                "product_name": row.product_name,
+                "stock": int(row.stock or 0),
+                "reserved": int(row.reserved or 0),
+                "available": int(row.available or 0),
+                "status": row.status,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/dashboard/customer-segments")
+async def get_customer_segments(
+    branch_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(
+        CustomerStats.segment,
+        func.count(CustomerStats.id).label("customers"),
+    ).join(Customer, Customer.id == CustomerStats.customer_id)
+
+    if branch_id:
+        query = query.filter(Customer.preferred_branch == branch_id)
+
+    rows = query.group_by(CustomerStats.segment).order_by(desc("customers")).all()
+
+    return {
+        "branch_id": branch_id,
+        "items": [
+            {
+                "segment": row.segment or "Unclassified",
+                "customers": int(row.customers or 0),
+            }
+            for row in rows
+        ],
+    }

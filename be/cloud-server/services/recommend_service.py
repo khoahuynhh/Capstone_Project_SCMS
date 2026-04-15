@@ -1,11 +1,8 @@
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
-
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
-
-
 from database.models import (
     Product,
     Transaction,

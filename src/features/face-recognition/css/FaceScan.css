@@ -1,0 +1,331 @@
+/* ===== Page wrapper + blur overlay (light background friendly) ===== */
+.facescan-page {
+    position: relative;
+    min-height: 100vh;
+    isolation: isolate;
+}
+
+.facescan-page::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background: url("https://raw.githubusercontent.com/khoahuynhh/HungPhatCaoNguyenCoffee/master/new_background.png") no-repeat center;
+    background-size: cover;
+    background-position: calc(50% + 0px) calc(50% + 20px);
+    z-index: -2;
+}
+
+.facescan-blur {
+    position: fixed;
+    inset: 0;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: rgba(255, 255, 255, 0.38);
+    z-index: 0;
+}
+
+.edgeScan {
+    max-width: 1280px;
+    margin: 0 auto;
+    min-height: 100vh;
+    padding: 10px 16px 16px;
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+
+    color: rgba(17, 24, 39, 0.92);
+    /* text dark */
+}
+
+/* ===== Top bar ===== */
+.edgeScan__top {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.edgeScan__title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: 0;
+    color: rgba(17, 24, 39, 0.95);
+}
+
+.edgeScan__subtitle {
+    margin: 2px 0 0;
+    font-size: 14px;
+    opacity: 0.8;
+    color: rgba(17, 24, 39, 0.72);
+}
+
+/* ===== Grid ===== */
+.edgeScan__grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.8fr);
+    gap: 14px;
+    align-items: stretch;
+    min-height: calc(100vh - 72px);
+    flex: 1;
+}
+
+@media (max-width: 900px) {
+    .edgeScan {
+        min-height: auto;
+        padding: 16px;
+    }
+
+    .edgeScan__grid {
+        grid-template-columns: 1fr;
+        min-height: auto;
+    }
+}
+
+/* ===== Card (light) ===== */
+.card {
+    border-radius: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    min-height: 0;
+}
+
+/* ===== Camera card ===== */
+.cameraCard {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    height: 100%;
+}
+
+.cameraCard__viewport {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.cameraCard__video {
+    width: 100%;
+    height: 100%;
+    min-height: 460px;
+    max-height: calc(100vh - 150px);
+    display: block;
+    object-fit: cover;
+}
+
+/* Overlay frame */
+.cameraCard__overlay {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+}
+
+.cameraCard__frame {
+    width: 57.5%;
+    aspect-ratio: 1 / 1;
+    border-radius: 18px;
+
+    /* khung rõ hơn trên nền sáng */
+    border: 2px solid rgba(15, 23, 42, 0.28);
+
+    /* vignette nhẹ để người dùng tập trung vào khuôn mặt */
+    box-shadow: 0 0 0 9999px rgba(255, 255, 255, 0.08) inset;
+
+    background: rgba(255, 255, 255, 0.12);
+}
+
+/* Actions */
+.cameraCard__actions {
+    padding: 10px 12px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    background: rgba(255, 255, 255, 0.3);
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+}
+
+.cameraCard__actions .btn {
+    flex: 1 1 180px;
+}
+
+.cameraCard__canvas {
+    display: none;
+}
+
+/* ===== Prediction card ===== */
+.predCard {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.predCard__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+}
+
+.predCard__title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 800;
+    color: rgba(17, 24, 39, 0.95);
+}
+
+.predCard__meta {
+    font-size: 12px;
+    color: rgba(17, 24, 39, 0.55);
+}
+
+.predCard__preview {
+    width: 100%;
+    max-height: 220px;
+    border-radius: 12px;
+    object-fit: cover;
+    border: 1px solid rgba(15, 23, 42, 0.10);
+}
+
+.predCard__placeholder {
+    min-height: 180px;
+    border-radius: 12px;
+    border: 1px dashed rgba(15, 23, 42, 0.25);
+    display: grid;
+    place-items: center;
+    color: rgba(17, 24, 39, 0.62);
+    background: rgba(255, 255, 255, 0.65);
+}
+
+/* Chips */
+.predCard__chips {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    background: rgba(15, 23, 42, 0.03);
+    color: rgba(17, 24, 39, 0.82);
+}
+
+.chip b {
+    color: rgba(17, 24, 39, 0.92);
+}
+
+/* Alert */
+.alert {
+    padding: 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(220, 38, 38, 0.35);
+    background: rgba(220, 38, 38, 0.08);
+    color: rgba(127, 29, 29, 0.92);
+}
+
+/* Tip */
+.predCard__tip {
+    margin-top: auto;
+    font-size: 13px;
+    color: rgba(17, 24, 39, 0.60);
+}
+
+/* ===== Buttons (light system) ===== */
+.btn {
+    border-radius: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(15, 23, 42, 0.14);
+    background: rgba(255, 255, 255, 0.85);
+    color: rgba(17, 24, 39, 0.90);
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+.btn:hover {
+    background: rgba(255, 255, 255, 1);
+    border-color: rgba(15, 23, 42, 0.22);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.10);
+    transform: translateY(-1px);
+}
+
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+
+/* Primary: đậm hơn chút để nổi */
+.btn--primary {
+    background: rgba(17, 24, 39, 0.92);
+    color: #fff;
+    border-color: rgba(17, 24, 39, 0.92);
+}
+
+.btn--primary:hover {
+    background: rgba(17, 24, 39, 1);
+    border-color: rgba(17, 24, 39, 1);
+    box-shadow: 0 10px 22px rgba(17, 24, 39, 0.18);
+}
+
+/* Secondary: nền xám nhẹ */
+.btn--secondary {
+    background: rgba(15, 23, 42, 0.06);
+}
+
+.btn--secondary:hover {
+    background: rgba(15, 23, 42, 0.09);
+}
+
+/* Ghost: trong suốt */
+.btn--ghost {
+    background: transparent;
+}
+
+.btn--ghost:hover {
+    background: rgba(15, 23, 42, 0.05);
+}
+
+@media (max-width: 900px) {
+    .edgeScan__topActions {
+        width: 100%;
+    }
+
+    .edgeScan__topActions .btn {
+        width: 100%;
+    }
+
+    .cameraCard__video {
+        min-height: 280px;
+        max-height: 52vh;
+    }
+
+    .cameraCard__actions {
+        position: static;
+    }
+
+    .cameraCard__actions .btn {
+        flex-basis: 100%;
+    }
+}

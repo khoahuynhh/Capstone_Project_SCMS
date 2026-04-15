@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Optional
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from database.db import SessionLocal
 from database.models import ABExperiment, ABExperimentEvent
@@ -29,6 +29,8 @@ class ExperimentCreate(BaseModel):
     target_metric: str = "ctr"  # ctr, conversion, revenue
 
 class ExperimentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     experiment_id: str
     experiment_name: str
     status: str
@@ -36,9 +38,6 @@ class ExperimentResponse(BaseModel):
     variant_b: dict
     start_date: Optional[datetime]
     end_date: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
 
 @router.post("/create", response_model=ExperimentResponse)
 async def create_experiment(request: ExperimentCreate, db: Session = Depends(get_db)):

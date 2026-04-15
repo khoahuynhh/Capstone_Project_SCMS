@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Edge AI Retail
+    orgId: 1
+    folder: Edge AI Retail
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

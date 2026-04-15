@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from typing import List, Optional
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from database.db import SessionLocal
 from database.models import ModelVersion
@@ -23,6 +23,8 @@ def get_db():
 
 # Pydantic models
 class ModelInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     version: str
     model_type: str
     model_format: str
@@ -35,9 +37,6 @@ class ModelInfo(BaseModel):
     is_active: bool
     training_date: Optional[datetime] = None
     deployed_to_branches: Optional[List[str]] = None
-    
-    class Config:
-        from_attributes = True
 
 class ModelDeployRequest(BaseModel):
     version: str

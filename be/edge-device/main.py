@@ -7,7 +7,7 @@ from datetime import datetime
 from modules.camera_simulator import CameraSimulator
 from modules.face_detector import FaceDetector
 from modules.recommender import ProductRecommender
-from modules.kafka_client import EdgeKafkaProducer
+from modules.mqtt_client import MQTTClient
 from prometheus_client import Counter, Histogram, start_http_server
 
 # Configure logging
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 INFERENCE_COUNTER = Counter("edge_inference_total", "Total inference requests")
 INFERENCE_LATENCY = Histogram("edge_inference_latency_seconds", "Inference latency")
 RECOMMENDATION_COUNTER = Counter("edge_recommendations_total", "Total recommendations")
-KAFKA_PUBLISH_COUNTER = Counter(
-    "edge_kafka_publish_total", "Kafka messages published from edge"
+MQTT_PUBLISH_COUNTER = Counter(
+    "edge_mqtt_publish_total", "MQTT messages published from edge"
 )
 
 
@@ -43,9 +43,7 @@ class EdgeDevice:
         self.camera = CameraSimulator()
         self.face_detector = FaceDetector()
         self.recommender = ProductRecommender(self.branch_id)
-        self.kafka_producer = EdgeKafkaProducer(
-            branch_id=self.branch_id, device_id=self.device_id
-        )
+        self.mqtt_client = MQTTClient(self.branch_id)
 
         # State
         self.running = False
@@ -70,13 +68,14 @@ class EdgeDevice:
             if face_data is None:
                 logger.debug("No face detected")
                 # Có thể gửi event 'no_face' nếu muốn tracking
-                self.kafka_producer.publish_face_event(
+                self.mqtt_client.publish_event(
+                    "no_face",
                     {
-                        "event_type": "no_face",
+                        "device_id": self.device_id,
                         "timestamp": datetime.now().isoformat(),
                     }
                 )
-                KAFKA_PUBLISH_COUNTER.inc()
+                MQTT_PUBLISH_COUNTER.inc()
                 return
 
             INFERENCE_COUNTER.inc()
@@ -89,21 +88,22 @@ class EdgeDevice:
 
             RECOMMENDATION_COUNTER.inc()
 
-            # Step 4: Gửi event face_recognized lên Kafka
+            # Step 4: Publish recommendation event to cloud over MQTT
             transaction_id = f"txn_{self.branch_id}_{int(time.time() * 1000)}"
 
-            face_event = {
+            recommendation_event = {
                 "event_type": "face_recognized",
+                "branch_id": self.branch_id,
+                "device_id": self.device_id,
                 "timestamp": datetime.now().isoformat(),
                 "customer_id": face_data.get("customer_id", "unknown"),
                 "face_attributes": face_data["attributes"],
-                "embedding": face_data.get("embedding"),
                 "recommendations": recommendations,
                 "transaction_id": transaction_id,
             }
 
-            self.kafka_producer.publish_face_event(face_event)
-            KAFKA_PUBLISH_COUNTER.inc()
+            if self.mqtt_client.publish_recommendation(recommendation_event):
+                MQTT_PUBLISH_COUNTER.inc()
 
             # Step 5: Simulate customer interaction & purchase
             purchased_items = self.simulate_purchase(recommendations)
@@ -121,9 +121,9 @@ class EdgeDevice:
                     "total_amount": sum(item["price"] for item in purchased_items),
                 }
 
-                self.kafka_producer.publish_transaction_event(tx_event)
+                if self.mqtt_client.publish_transaction(tx_event):
+                    MQTT_PUBLISH_COUNTER.inc()
                 self.transaction_count += 1
-                KAFKA_PUBLISH_COUNTER.inc()
 
                 logger.info(
                     "Transaction completed: %d items, Total: %.2f VND",
@@ -134,6 +134,17 @@ class EdgeDevice:
             # Measure latency
             latency = time.time() - start_time
             INFERENCE_LATENCY.observe(latency)
+            if self.mqtt_client.publish_metrics(
+                {
+                    "branch_id": self.branch_id,
+                    "device_id": self.device_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "inference_latency_seconds": latency,
+                    "total_transactions": self.transaction_count,
+                    "recommendations_count": len(recommendations),
+                }
+            ):
+                MQTT_PUBLISH_COUNTER.inc()
             logger.info("Customer processed in %.2f ms", latency * 1000.0)
 
         except Exception as e:
@@ -190,6 +201,7 @@ class EdgeDevice:
 
         # Start Prometheus metrics server
         start_http_server(8001)
+        self.mqtt_client.connect()
 
         try:
             import random
@@ -211,7 +223,7 @@ class EdgeDevice:
     def cleanup(self):
         """Cleanup resources"""
         self.running = False
-        self.kafka_producer.flush()
+        self.mqtt_client.disconnect()
         logger.info("Total transactions: %d", self.transaction_count)
 
 

@@ -2,20 +2,16 @@
 import io
 import logging
 import os
-import time
-from typing import Any, Dict
 
-import cv2
-import numpy as np
+from typing import Any, Dict
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
-
 from config import get_settings
-from modules.face_detector import FaceDetector
 from modules.recommender import ProductRecommender
 from modules.recommender import fetch_cloud_recommendations
 from modules.mqtt_client import MQTTClient
+from modules.model import FaceAttrPredictor
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -30,6 +26,8 @@ app = FastAPI(
     version=settings.APP_VERSION,
 )
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ========= CORS =========
 # Cho phép FE (React) gọi từ browser
 app.add_middleware(
@@ -42,18 +40,27 @@ app.add_middleware(
 
 # ========= GLOBAL OBJECTS =========
 
-# FaceDetector: bên trong đã load BlazeFace + model nhận diện .pth
-face_detector = FaceDetector(
-    model_path=settings.FACE_DETECTION_MODEL_PATH,
-    min_conf=settings.FACE_DETECTION_CONFIDENCE,
-)
-
 # Recommender: gợi ý sản phẩm theo chi nhánh
 recommender = ProductRecommender(settings.BRANCH_ID)
 
 # Thông tin định danh edge (có thể lấy từ .env / config)
 BRANCH_ID = os.getenv("BRANCH_ID", settings.BRANCH_ID)
 DEVICE_ID = os.getenv("DEVICE_ID", settings.DEVICE_ID)
+
+# Mô hình
+MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "models")
+MODEL_DIR = os.path.join(BASE_DIR, MODEL_STORAGE_PATH)
+MODEL_PATH = os.path.join(MODEL_DIR, "best_model.pth")
+attr_predictor = None
+try:
+    attr_predictor = FaceAttrPredictor(
+        ckpt_path=MODEL_PATH,
+        backbone_name="resnet50_pretrained",
+        emo_classes=7,
+    )
+except Exception as e:
+    print(f"Lỗi khởi tạo mô hình Face Attributes: {e}")
+    attr_predictor = None
 
 
 # ========= HEALTHCHECK =========
@@ -72,69 +79,51 @@ def health_check() -> Dict[str, Any]:
     }
 
 
-# ========= FACE IDENTIFICATION =========
-@app.post("/face/identify")
+# ========= FACE ANALYSIS =========
+@app.post("/face/analysis")
 async def face_identify(file: UploadFile = File(...)) -> Dict[str, Any]:
     try:
+        # 1. Đọc và kiểm tra ảnh từ request
         image_bytes = await file.read()
         try:
             pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid image file")
 
-        frame_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        # 2. Lấy Face Attributes trực tiếp từ model.py (Age, Gender, Emotion)
+        if attr_predictor is None:
+            raise HTTPException(
+                status_code=500, detail="Face attribute model is not loaded"
+            )
 
-        face_data = face_detector.detect_and_extract(frame_bgr)
-        if face_data is None:
-            return {
-                "success": False,
-                "reason": "no_face_detected",
-                "branch_id": BRANCH_ID,
-                "device_id": DEVICE_ID,
-            }
+        attributes = attr_predictor.predict(pil_img)
 
-        embedding = face_data.get("embedding")
-        attributes = face_data.get("attributes") or {}
+        # 3. Bỏ qua Embedding & Nhận diện (Mặc định là khách vãng lai/ẩn danh)
+        customer_id = None
+        similarity = 0.0
 
-        # 1) MQTT RPC -> cloud identify + recommendations (realtime)
-        resp = MQTTClient.request_face_identify(
-            embedding=embedding,
-            attributes=attributes,
-            timeout=1.0,  # tune
+        # 4. Lấy gợi ý sản phẩm (Local) dựa hoàn toàn vào các thuộc tính khuôn mặt
+        recommendations = recommender.recommend_products(
+            face_attributes=attributes,
+            customer_id=customer_id,  # Truyền None để recommender biết đây là khách mới
         )
 
-        # 2) Parse result + fallback
-        if resp.get("success"):
-            customer_id = resp.get("customer_id")
-            similarity = float(resp.get("similarity", 0.0))
-            recommendations = resp.get("recommendations", [])
-            source = "cloud_mqtt"
-        else:
-            # fallback local (tùy bạn: local verify + local recs)
-            customer_id = face_data.get("customer_id")  # nếu local detector có verify
-            similarity = float(face_data.get("similarity", 0.0))
-            recommendations = recommender.recommend_products(
-                face_attributes=attributes,
-                customer_id=customer_id,
-            )
-            source = f"fallback_{resp.get('reason','unknown')}"
-
-        # 4) Response cho FE
+        # 5. Trả về kết quả cho Frontend
         return {
             "success": True,
             "branch_id": BRANCH_ID,
             "device_id": DEVICE_ID,
-            "customer_id": customer_id,
-            "similarity": similarity,
-            "face_attributes": attributes,
+            "customer_id": customer_id,  # Sẽ là None
+            "similarity": similarity,  # Sẽ là 0.0
+            "face_attributes": attributes,  # Ví dụ: {'age': 25, 'gender': 'Male', 'emotion': 'Happy'}
             "recommendations": recommendations,
-            "source": source,
+            "source": "local_attributes_only",  # Đổi source để FE biết dữ liệu lấy từ đâu
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Error in /face/identify: %s", e)
+        logger.exception("Error in /face/analysis: %s", e)
         raise HTTPException(
             status_code=500, detail="Internal server error on edge device"
         )

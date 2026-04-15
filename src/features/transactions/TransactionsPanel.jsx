@@ -16,7 +16,9 @@ export default function TransactionsPanel() {
         if (!mounted) return;
         const list = Array.isArray(b?.branches) ? b.branches : [];
         setBranches(list);
-        if (list.length && !branch) setBranch(list[0]);
+        if (list.length) {
+          setBranch((current) => current || list[0]);
+        }
       } catch (e) {
         if (!mounted) return;
         setError(e?.message || 'Failed to load branches');

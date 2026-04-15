@@ -1,113 +1,115 @@
-"""
+﻿"""
 Configuration management for Edge Device
 Loads settings from environment variables with sensible defaults
 """
 import os
 from typing import Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
 class EdgeSettings(BaseSettings):
     """Edge device settings loaded from environment variables"""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
     
     # Device Identity
-    BRANCH_ID: str = Field(default="branch_001", env="BRANCH_ID")
-    BRANCH_NAME: str = Field(default="Default Branch", env="BRANCH_NAME")
-    DEVICE_ID: str = Field(default="edge_001", env="DEVICE_ID")
+    BRANCH_ID: str = Field(default="branch_001")
+    BRANCH_NAME: str = Field(default="Default Branch")
+    DEVICE_ID: str = Field(default="edge_001")
     
     # Application
     APP_NAME: str = "Edge AI Retail - Edge Device"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = Field(default=False, env="DEBUG")
+    DEBUG: bool = Field(default=False)
     
     # Server
-    API_HOST: str = Field(default="0.0.0.0", env="API_HOST")
-    API_PORT: int = Field(default=8001, env="API_PORT")
+    API_HOST: str = Field(default="0.0.0.0")
+    API_PORT: int = Field(default=8001)
     
     # Cloud Server
-    CLOUD_API: str = Field(default="http://localhost:8000", env="CLOUD_API")
-    CLOUD_API_KEY: Optional[str] = Field(default=None, env="CLOUD_API_KEY")
-    CLOUD_API_TIMEOUT: int = Field(default=30, env="CLOUD_API_TIMEOUT")
+    CLOUD_API: str = Field(default="http://localhost:8000")
+    CLOUD_API_KEY: Optional[str] = Field(default=None)
+    CLOUD_API_TIMEOUT: int = Field(default=30)
     
     # Redis (for local caching)
-    REDIS_URL: str = Field(default="redis://localhost:6379", env="REDIS_URL")
-    CACHE_TTL: int = Field(default=3600, env="CACHE_TTL")  # 1 hour
+    REDIS_URL: str = Field(default="redis://localhost:6379")
+    CACHE_TTL: int = Field(default=3600)  # 1 hour
     
     # MQTT
-    MQTT_BROKER: str = Field(default="localhost", env="MQTT_BROKER")
-    MQTT_PORT: int = Field(default=1883, env="MQTT_PORT")
-    MQTT_USERNAME: Optional[str] = Field(default=None, env="MQTT_USERNAME")
-    MQTT_PASSWORD: Optional[str] = Field(default=None, env="MQTT_PASSWORD")
-    MQTT_KEEPALIVE: int = Field(default=60, env="MQTT_KEEPALIVE")
-    MQTT_QOS: int = Field(default=1, env="MQTT_QOS")
+    MQTT_BROKER: str = Field(default="localhost")
+    MQTT_PORT: int = Field(default=1883)
+    MQTT_USERNAME: Optional[str] = Field(default=None)
+    MQTT_PASSWORD: Optional[str] = Field(default=None)
+    MQTT_KEEPALIVE: int = Field(default=60)
+    MQTT_QOS: int = Field(default=1)
     
     # Camera Settings
-    CAMERA_ENABLED: bool = Field(default=True, env="CAMERA_ENABLED")
-    CAMERA_INDEX: int = Field(default=0, env="CAMERA_INDEX")
-    CAMERA_WIDTH: int = Field(default=640, env="CAMERA_WIDTH")
-    CAMERA_HEIGHT: int = Field(default=480, env="CAMERA_HEIGHT")
-    CAMERA_FPS: int = Field(default=30, env="CAMERA_FPS")
-    CAMERA_MOCK: bool = Field(default=True, env="CAMERA_MOCK")  # Use mock camera for simulation
+    CAMERA_ENABLED: bool = Field(default=True)
+    CAMERA_INDEX: int = Field(default=0)
+    CAMERA_WIDTH: int = Field(default=640)
+    CAMERA_HEIGHT: int = Field(default=480)
+    CAMERA_FPS: int = Field(default=30)
+    CAMERA_MOCK: bool = Field(default=True)  # Use mock camera for simulation
     
     # Face Detection
-    FACE_DETECTION_ENABLED: bool = Field(default=True, env="FACE_DETECTION_ENABLED")
-    FACE_MIN_SIZE: int = Field(default=50, env="FACE_MIN_SIZE")
-    FACE_DETECTION_CONFIDENCE: float = Field(default=0.7, env="FACE_DETECTION_CONFIDENCE")
-    FACE_DETECTION_MODEL_PATH: str = Field(default="./models/face_detector.onnx", env="FACE_DETECTION_MODEL_PATH")
+    FACE_DETECTION_ENABLED: bool = Field(default=True)
+    FACE_MIN_SIZE: int = Field(default=50)
+    FACE_DETECTION_CONFIDENCE: float = Field(default=0.7)
+    FACE_DETECTION_MODEL_PATH: str = Field(default="./models/face_detector.onnx")
     
     # Recommendation
-    RECOMMENDATION_ENABLED: bool = Field(default=True, env="RECOMMENDATION_ENABLED")
-    RECOMMENDATION_TOP_K: int = Field(default=5, env="RECOMMENDATION_TOP_K")
-    RECOMMENDATION_MODEL_PATH: str = Field(default="./models/recommender.onnx", env="RECOMMENDATION_MODEL_PATH")
-    RECOMMENDATION_TIMEOUT_MS: int = Field(default=200, env="RECOMMENDATION_TIMEOUT_MS")
+    RECOMMENDATION_ENABLED: bool = Field(default=True)
+    RECOMMENDATION_TOP_K: int = Field(default=5)
+    RECOMMENDATION_MODEL_PATH: str = Field(default="./models/recommender.onnx")
+    RECOMMENDATION_TIMEOUT_MS: int = Field(default=200)
     
     # Model Management
-    MODEL_STORAGE_PATH: str = Field(default="./models", env="MODEL_STORAGE_PATH")
-    MODEL_AUTO_UPDATE: bool = Field(default=True, env="MODEL_AUTO_UPDATE")
-    MODEL_UPDATE_CHECK_INTERVAL: int = Field(default=3600, env="MODEL_UPDATE_CHECK_INTERVAL")  # 1 hour
+    MODEL_STORAGE_PATH: str = Field(default="./models")
+    MODEL_AUTO_UPDATE: bool = Field(default=True)
+    MODEL_UPDATE_CHECK_INTERVAL: int = Field(default=3600)  # 1 hour
     
     # Performance
-    INFERENCE_BATCH_SIZE: int = Field(default=1, env="INFERENCE_BATCH_SIZE")
-    INFERENCE_DEVICE: str = Field(default="cpu", env="INFERENCE_DEVICE")  # cpu, cuda, or tensorrt
-    MAX_CONCURRENT_INFERENCES: int = Field(default=2, env="MAX_CONCURRENT_INFERENCES")
+    INFERENCE_BATCH_SIZE: int = Field(default=1)
+    INFERENCE_DEVICE: str = Field(default="cpu")  # cpu, cuda, or tensorrt
+    MAX_CONCURRENT_INFERENCES: int = Field(default=2)
     
     # Customer Interaction
-    CUSTOMER_WAIT_TIME_MIN: float = Field(default=5.0, env="CUSTOMER_WAIT_TIME_MIN")
-    CUSTOMER_WAIT_TIME_MAX: float = Field(default=15.0, env="CUSTOMER_WAIT_TIME_MAX")
-    PURCHASE_PROBABILITY: float = Field(default=0.4, env="PURCHASE_PROBABILITY")
-    RECOMMENDATION_ACCEPTANCE_RATE: float = Field(default=0.6, env="RECOMMENDATION_ACCEPTANCE_RATE")
+    CUSTOMER_WAIT_TIME_MIN: float = Field(default=5.0)
+    CUSTOMER_WAIT_TIME_MAX: float = Field(default=15.0)
+    PURCHASE_PROBABILITY: float = Field(default=0.4)
+    RECOMMENDATION_ACCEPTANCE_RATE: float = Field(default=0.6)
     
     # Privacy & Consent
-    REQUIRE_CONSENT: bool = Field(default=True, env="REQUIRE_CONSENT")
-    STORE_FACE_IMAGES: bool = Field(default=False, env="STORE_FACE_IMAGES")
-    ANONYMIZE_DATA: bool = Field(default=True, env="ANONYMIZE_DATA")
+    REQUIRE_CONSENT: bool = Field(default=True)
+    STORE_FACE_IMAGES: bool = Field(default=False)
+    ANONYMIZE_DATA: bool = Field(default=True)
     
     # Monitoring
-    METRICS_ENABLED: bool = Field(default=True, env="METRICS_ENABLED")
-    METRICS_PORT: int = Field(default=9091, env="METRICS_PORT")
-    LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
+    METRICS_ENABLED: bool = Field(default=True)
+    METRICS_PORT: int = Field(default=9091)
+    LOG_LEVEL: str = Field(default="INFO")
     
     # Heartbeat
-    HEARTBEAT_ENABLED: bool = Field(default=True, env="HEARTBEAT_ENABLED")
-    HEARTBEAT_INTERVAL: int = Field(default=60, env="HEARTBEAT_INTERVAL")  # seconds
+    HEARTBEAT_ENABLED: bool = Field(default=True)
+    HEARTBEAT_INTERVAL: int = Field(default=60)  # seconds
     
     # Data Sync
-    SYNC_ENABLED: bool = Field(default=True, env="SYNC_ENABLED")
-    SYNC_INTERVAL: int = Field(default=300, env="SYNC_INTERVAL")  # 5 minutes
-    SYNC_BATCH_SIZE: int = Field(default=100, env="SYNC_BATCH_SIZE")
+    SYNC_ENABLED: bool = Field(default=True)
+    SYNC_INTERVAL: int = Field(default=300)  # 5 minutes
+    SYNC_BATCH_SIZE: int = Field(default=100)
     
     # Federated Learning
-    FL_ENABLED: bool = Field(default=True, env="FL_ENABLED")
-    FL_LOCAL_EPOCHS: int = Field(default=1, env="FL_LOCAL_EPOCHS")
-    FL_BATCH_SIZE: int = Field(default=32, env="FL_BATCH_SIZE")
-    FL_LEARNING_RATE: float = Field(default=0.01, env="FL_LEARNING_RATE")
+    FL_ENABLED: bool = Field(default=True)
+    FL_LOCAL_EPOCHS: int = Field(default=1)
+    FL_BATCH_SIZE: int = Field(default=32)
+    FL_LEARNING_RATE: float = Field(default=0.01)
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
-
 
 # Global settings instance
 settings = EdgeSettings()

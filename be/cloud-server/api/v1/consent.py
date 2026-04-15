@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional
 from datetime import datetime, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from database.db import SessionLocal
+from fastapi.concurrency import run_in_threadpool
 from database.models import (
     CustomerConsent,
     PrivacyAuditLog,
@@ -40,15 +41,14 @@ class ConsentRequest(BaseModel):
 
 
 class ConsentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     customer_id: str
     face_recognition_consent: bool
     data_collection_consent: bool
     marketing_consent: bool
     opted_out: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class OptOutRequest(BaseModel):
@@ -185,7 +185,6 @@ async def opt_out(request: OptOutRequest, db: Session = Depends(get_db)):
 @router.get("/{customer_id}", response_model=ConsentResponse)
 async def get_consent(customer_id: str, db: Session = Depends(get_db)):
     """Get customer consent status"""
-    from fastapi.concurrency import run_in_threadpool
 
     def query_consent():
         return (

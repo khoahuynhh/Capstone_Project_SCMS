@@ -16,8 +16,13 @@ class MQTTClient:
 
     def __init__(self, branch_id):
         self.branch_id = branch_id
-        self.broker_host = os.getenv("MQTT_BROKER", "mosquitto").split(":")[0]
-        self.broker_port = int(os.getenv("MQTT_BROKER", "mosquitto:1883").split(":")[1])
+        broker = os.getenv("MQTT_BROKER", "mosquitto:1883")
+        if ":" in broker:
+            self.broker_host, broker_port = broker.rsplit(":", 1)
+            self.broker_port = int(broker_port)
+        else:
+            self.broker_host = broker
+            self.broker_port = int(os.getenv("MQTT_PORT", "1883"))
 
         # MQTT topics
         self.topics = {

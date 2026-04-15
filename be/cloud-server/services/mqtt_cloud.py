@@ -14,8 +14,14 @@ class MQTTSubscriber:
     """MQTT subscriber to receive data from edge devices"""
 
     def __init__(self):
-        self.broker_host = os.getenv("MQTT_BROKER", "mosquitto").split(":")[0]
-        self.broker_port = int(os.getenv("MQTT_BROKER", "mosquitto:1883").split(":")[1])
+        mqtt_url = os.getenv("MQTT_BROKER", "localhost:1883")
+
+        if ":" in mqtt_url:
+            self.broker_host, port = mqtt_url.split(":")
+            self.broker_port = int(port)
+        else:
+            self.broker_host = mqtt_url
+            self.broker_port = 1883
 
         # Subscribe to all branches
         self.topics = [

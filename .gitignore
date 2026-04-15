@@ -33,6 +33,8 @@ coverage
 .env.*
 .env.local
 .env.*.local
+!.env.example
+!**/.env.example
 
 # Python bytecode and caches
 __pycache__/
@@ -81,6 +83,13 @@ db.sqlite3
 db.sqlite3-journal
 instance/
 .webassets-cache
+
+# Local/generated app data and model artifacts
+be/**/data/*.json
+be/**/models/*.onnx
+be/**/models/*.pth
+be/**/models/*.pt
+be/**/models/*.ckpt
 
 # Jupyter/IPython
 .ipynb_checkpoints/

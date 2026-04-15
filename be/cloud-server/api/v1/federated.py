@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from typing import List, Optional
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from database.db import SessionLocal
 from database.models import FederatedLearningRound, FederatedClientUpdate
@@ -33,13 +33,12 @@ class AggregationRequest(BaseModel):
     min_clients: int = 2
 
 class AggregationStatus(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     round_number: int
     status: str
     participating_branches: List[str]
     aggregation_method: str
-    
-    class Config:
-        from_attributes = True
 
 # ============ Federated Learning Endpoints ============
 
