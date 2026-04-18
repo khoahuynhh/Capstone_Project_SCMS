@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime
 from database.db import SessionLocal
-from database.models import Transaction, Recommendation, Customer
+from database.models import Transaction, Recommendation, Customer, EdgeDevice
 from threading import Lock
 
 logger = logging.getLogger(__name__)
@@ -223,12 +223,70 @@ class MQTTSubscriber:
         logger.info(f"Event received: {event_type} from {data.get('branch_id')}")
 
         # Handle specific event types
-        if event_type == "model_update_ack":
+        if event_type in {"edge_online", "edge_heartbeat", "edge_offline"}:
+            self._handle_edge_status(data)
+        elif event_type == "model_update_ack":
             logger.info(f"Model update acknowledged by {data.get('branch_id')}")
         elif event_type == "error":
             logger.error(
                 f"Error reported by {data.get('branch_id')}: {data.get('data')}"
             )
+
+    def _parse_timestamp(self, value):
+        if value is None:
+            return datetime.utcnow()
+        if isinstance(value, (int, float)):
+            return datetime.utcfromtimestamp(value)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone().replace(tzinfo=None)
+                return parsed
+            except ValueError:
+                return datetime.utcnow()
+        return datetime.utcnow()
+
+    def _handle_edge_status(self, data: dict):
+        payload = data.get("data") or {}
+        branch_id = payload.get("branch_id") or data.get("branch_id")
+        device_id = payload.get("device_id") or data.get("device_id")
+        event_type = data.get("event_type")
+
+        if not branch_id or not device_id:
+            logger.warning("Edge status event missing branch_id/device_id: %s", data)
+            return
+
+        status = "offline" if event_type == "edge_offline" else "active"
+        last_seen = self._parse_timestamp(payload.get("timestamp") or data.get("timestamp"))
+
+        db = SessionLocal()
+        try:
+            device = db.query(EdgeDevice).filter(EdgeDevice.id == device_id).first()
+            if not device:
+                device = EdgeDevice(
+                    id=device_id,
+                    branch_id=branch_id,
+                    name=payload.get("name") or device_id,
+                    description="Registered from edge MQTT heartbeat",
+                )
+                db.add(device)
+
+            device.branch_id = branch_id
+            device.status = status
+            device.last_seen = last_seen
+            db.commit()
+            logger.info(
+                "Edge device status updated: device=%s branch=%s status=%s",
+                device_id,
+                branch_id,
+                status,
+            )
+        except Exception as e:
+            logger.error(f"Error updating edge status: {e}", exc_info=True)
+            db.rollback()
+        finally:
+            db.close()
 
     def _update_customer_profile(self, db, transaction_data: dict):
         """Update or create customer profile"""

@@ -1,22 +1,28 @@
 # Start all services
+
 docker compose up -d
 
 # Check logs
+
 docker compose logs -f cloud-server
 
 # Access services:
+
 # - Cloud API: http://localhost:8000
+
 # - API Docs: http://localhost:8000/docs
+
 # - Grafana: http://localhost:3000 (admin/admin)
+
 # - Prometheus: http://localhost:9090
 
-
 # Run server
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
+uvicorn main:app --reload --host 0.0.0.0 --port 8002
 
 #### Edge Device
-```bash
+
+````bash
 
 # Create virtual environment
 # Set environment variables
@@ -40,9 +46,10 @@ curl -X POST "http://localhost:8000/api/v1/models/upload" \
   -F "model_type=recommender" \
   -F "model_format=onnx" \
   -F "file=@models/recommender.onnx"
-```
+````
 
 ### 3. Deploy Model to Edge
+
 ```bash
 curl -X POST "http://localhost:8000/api/v1/models/deploy" \
   -H "Content-Type: application/json" \
@@ -53,6 +60,7 @@ curl -X POST "http://localhost:8000/api/v1/models/deploy" \
 ```
 
 ### 4. Create A/B Test
+
 ```bash
 curl -X POST "http://localhost:8000/api/v1/experiments/create" \
   -H "Content-Type: application/json" \
@@ -66,6 +74,7 @@ curl -X POST "http://localhost:8000/api/v1/experiments/create" \
 ```
 
 ### 5. Trigger Federated Learning
+
 ```bash
 curl -X POST "http://localhost:8000/api/v1/federated/aggregate" \
   -H "Content-Type: application/json" \
@@ -81,15 +90,18 @@ curl -X POST "http://localhost:8000/api/v1/federated/aggregate" \
 ## API Documentation
 
 ### Interactive API Docs
+
 Truy cập: http://localhost:8000/docs (Swagger UI)
 
 ### Main Endpoints
 
 #### Transactions
+
 - `GET /api/v1/transactions` - List transactions
 - `GET /api/v1/transactions/{id}` - Get transaction details
 
 #### Model Management
+
 - `POST /api/v1/models/upload` - Upload model
 - `POST /api/v1/models/deploy` - Deploy model
 - `POST /api/v1/models/rollback` - Rollback model
@@ -97,24 +109,28 @@ Truy cập: http://localhost:8000/docs (Swagger UI)
 - `GET /api/v1/models/active/{type}` - Get active model
 
 #### Privacy & Consent
+
 - `POST /api/v1/consent/opt-in` - Customer opt-in
 - `POST /api/v1/consent/opt-out` - Customer opt-out
 - `DELETE /api/v1/consent/data/{customer_id}` - Delete customer data (GDPR)
 - `GET /api/v1/consent/{customer_id}` - Get consent status
 
 #### A/B Testing
+
 - `POST /api/v1/experiments/create` - Create experiment
 - `POST /api/v1/experiments/{id}/start` - Start experiment
 - `GET /api/v1/experiments/{id}/results` - Get results
 - `POST /api/v1/experiments/{id}/conclude` - Conclude experiment
 
 #### Federated Learning
+
 - `POST /api/v1/federated/upload-update` - Upload client update
 - `POST /api/v1/federated/aggregate` - Trigger aggregation
 - `GET /api/v1/federated/status/{round}` - Get round status
 - `GET /api/v1/federated/history` - Get FL history
 
 #### Analytics
+
 - `GET /api/v1/analytics/ctr` - CTR metrics
 - `GET /api/v1/analytics/inventory-optimization` - Inventory recommendations
 - `GET /api/v1/analytics/model-performance` - Model performance over time
@@ -188,6 +204,7 @@ CAMERA_MOCK=False  # Set to True for simulation
 ## Monitoring
 
 ### Grafana Dashboards
+
 1. Access: http://localhost:3000
 2. Login: admin/admin
 3. Dashboards:
@@ -196,16 +213,17 @@ CAMERA_MOCK=False  # Set to True for simulation
    - **Federated Learning**: Round progress, client updates
 
 ### Prometheus Metrics
+
 - `edge_inference_total` - Total inferences
 - `edge_inference_latency_seconds` - Inference latency histogram
 - `edge_recommendations_total` - Total recommendations
 - `edge_recommendations_accepted` - Accepted recommendations
 - `federated_learning_round_number` - Current FL round
 
-
 ## Bảo mật & Privacy
 
 ### Privacy Features
+
 - **Opt-in/Opt-out mechanism** tại quầy
 - **Face images không lưu** (chỉ embeddings)
 - **Data anonymization** cho analytics
@@ -214,6 +232,7 @@ CAMERA_MOCK=False  # Set to True for simulation
 - **Data retention policies** (tự động xóa sau X ngày)
 
 ### Security Best Practices
+
 1. Đổi `JWT_SECRET_KEY` trong production
 2. Enable HTTPS/TLS cho APIs
 3. Set `API_KEY_ENABLED=True` và tạo keys cho edge devices
@@ -223,7 +242,9 @@ CAMERA_MOCK=False  # Set to True for simulation
 ---
 
 ## Phát triển
+
 ### Database Migrations
+
 ```bash
 # Create migration
 alembic revision --autogenerate -m "Add new table"
@@ -236,6 +257,7 @@ alembic downgrade -1
 ```
 
 ### Running Tests
+
 ```bash
 # Unit tests
 pytest tests/
@@ -246,5 +268,3 @@ pytest tests/integration/
 # Coverage
 pytest --cov=cloud-server --cov-report=html
 ```
-
-

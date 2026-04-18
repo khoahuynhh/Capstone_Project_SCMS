@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     HOST: str = Field(default="0.0.0.0")
     PORT: int = Field(default=8000)
     WORKERS: int = Field(default=4)
+    CORS_ORIGINS: str = Field(
+        default=(
+            "http://localhost:5173,"
+            "http://127.0.0.1:5173,"
+            "http://localhost:4173,"
+            "http://127.0.0.1:4173"
+        )
+    )
 
     # Database
     DATABASE_URL: str | None = Field(default=None)

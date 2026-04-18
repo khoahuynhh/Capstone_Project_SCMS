@@ -1,232 +1,278 @@
-import random
-import redis
 import json
+import logging
 import os
-from typing import List, Dict
-import httpx
+import time
+from typing import Any, Dict, List, Optional
 
-CLOUD_API = os.getenv("CLOUD_API", "http://localhost:8000")
+import redis
+import requests
+
+logger = logging.getLogger(__name__)
 
 
-async def fetch_cloud_recommendations(branch_id: str, customer_id: str, top_k: int = 5):
-    url = f"{CLOUD_API}/api/recommend"
-    params = {"branch_id": branch_id, "customer_id": customer_id, "top_k": top_k}
-    async with httpx.AsyncClient(timeout=2.5) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
+def _clean_base_url(url: str) -> str:
+    return (url or "").rstrip("/")
+
+
+def _age_group(age: Optional[int]) -> str:
+    if age is None:
+        return "unknown"
+    if age < 18:
+        return "UNDER_18"
+    if age <= 24:
+        return "18_24"
+    if age <= 34:
+        return "25_34"
+    if age <= 44:
+        return "35_44"
+    return "45_PLUS"
+
+
+def _age_group_matches(product_group: Optional[str], customer_age: Optional[int]) -> bool:
+    if not product_group or product_group.lower() in {"all", "any", "unisex"}:
+        return True
+    if customer_age is None:
+        return False
+
+    value = product_group.strip().upper().replace("-", "_")
+    if value == _age_group(customer_age):
+        return True
+
+    if "_" in value:
+        try:
+            lo, hi = [int(x) for x in value.split("_", 1)]
+            return lo <= customer_age <= hi
+        except ValueError:
+            return False
+
+    if value.endswith("_PLUS") or value.endswith("+"):
+        try:
+            lo = int(value.replace("_PLUS", "").replace("+", ""))
+            return customer_age >= lo
+        except ValueError:
+            return False
+
+    return False
 
 
 class ProductRecommender:
-    """Product recommendation engine at the edge"""
+    """
+    Edge-side recommendation adapter.
 
-    def __init__(self, branch_id):
+    The edge no longer owns a hard-coded catalog. It pulls product data from the
+    cloud API, ranks anonymous visitors by face attributes, and delegates known
+    customer recommendations to the cloud recommender when possible.
+    """
+
+    def __init__(self, branch_id: str):
         self.branch_id = branch_id
+        self.cloud_api = _clean_base_url(os.getenv("CLOUD_API", "http://localhost:8000"))
+        self.top_k = int(os.getenv("RECOMMENDATION_TOP_K", "5"))
+        self.timeout = float(os.getenv("CLOUD_API_TIMEOUT", "30"))
+        self.catalog_ttl = int(os.getenv("EDGE_PRODUCT_CACHE_TTL", "300"))
+        self._catalog_cache: tuple[float, List[dict]] = (0.0, [])
 
-        # Connect to Redis for caching
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        self.redis_client = redis.from_url(redis_url, decode_responses=True)
-
-        # Mock product catalog
-        self.products = self._load_product_catalog()
-
-    def _load_product_catalog(self):
-        """Load mock product catalog"""
-        categories = {
-            "Beverage": [
-                {
-                    "id": "BEV001",
-                    "name": "Coca Cola",
-                    "price": 15000,
-                    "popularity": 0.9,
-                },
-                {"id": "BEV002", "name": "Pepsi", "price": 14000, "popularity": 0.8},
-                {
-                    "id": "BEV003",
-                    "name": "Trà xanh",
-                    "price": 10000,
-                    "popularity": 0.85,
-                },
-                {
-                    "id": "BEV004",
-                    "name": "Nước suối",
-                    "price": 5000,
-                    "popularity": 0.95,
-                },
-                {"id": "BEV005", "name": "Sting", "price": 12000, "popularity": 0.7},
-            ],
-            "Snack": [
-                {
-                    "id": "SNK001",
-                    "name": "Lay's Chips",
-                    "price": 20000,
-                    "popularity": 0.85,
-                },
-                {
-                    "id": "SNK002",
-                    "name": "Oishi Snack",
-                    "price": 10000,
-                    "popularity": 0.8,
-                },
-                {"id": "SNK003", "name": "Poca", "price": 15000, "popularity": 0.75},
-                {"id": "SNK004", "name": "Bánh quy", "price": 25000, "popularity": 0.7},
-            ],
-            "Personal Care": [
-                {
-                    "id": "PC001",
-                    "name": "Kem đánh răng",
-                    "price": 35000,
-                    "popularity": 0.6,
-                },
-                {"id": "PC002", "name": "Dầu gội", "price": 80000, "popularity": 0.5},
-                {"id": "PC003", "name": "Xà phòng", "price": 20000, "popularity": 0.65},
-            ],
-            "Dairy": [
-                {
-                    "id": "DRY001",
-                    "name": "Sữa tươi Vinamilk",
-                    "price": 30000,
-                    "popularity": 0.85,
-                },
-                {"id": "DRY002", "name": "Sữa chua", "price": 8000, "popularity": 0.9},
-                {"id": "DRY003", "name": "Phô mai", "price": 45000, "popularity": 0.6},
-            ],
-            "Instant Food": [
-                {
-                    "id": "IF001",
-                    "name": "Mì Hảo Hảo",
-                    "price": 5000,
-                    "popularity": 0.95,
-                },
-                {"id": "IF002", "name": "Cơm hộp", "price": 25000, "popularity": 0.7},
-                {
-                    "id": "IF003",
-                    "name": "Bánh mì sandwich",
-                    "price": 20000,
-                    "popularity": 0.75,
-                },
-            ],
-        }
-
-        # Flatten to list
-        all_products = []
-        for category, items in categories.items():
-            for item in items:
-                item["category"] = category
-                all_products.append(item)
-
-        return all_products
+        self.redis_client = None
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                self.redis_client = redis.from_url(redis_url, decode_responses=True)
+            except Exception as exc:
+                logger.warning("Redis cache disabled: %s", exc)
 
     def get_recommendations(
-        self, face_attributes: Dict, customer_id: str = None, top_k: int = 5
-    ) -> List[Dict]:
-        """
-        Get product recommendations based on face attributes and history
+        self,
+        face_attributes: Dict[str, Any],
+        customer_id: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        top_k = top_k or self.top_k
 
-        Args:
-            face_attributes: Demographics (age, gender, etc.)
-            customer_id: Optional customer identifier
-            top_k: Number of recommendations
-
-        Returns:
-            List of recommended products
-        """
-        # Try to get cached recommendations first
         if customer_id:
-            cached = self._get_cached_recommendations(customer_id)
-            if cached:
-                return cached[:top_k]
+            cloud = self._get_cloud_customer_recommendations(customer_id, top_k)
+            if cloud:
+                return cloud
 
-        # Generate recommendations
-        recommendations = []
+        catalog = self._load_product_catalog()
+        return self._rank_catalog_for_attributes(catalog, face_attributes, top_k)
 
-        # Rule-based recommendations based on demographics
-        age_group = face_attributes.get("age_group", "26-35")
-        gender = face_attributes.get("gender", "Male")
+    def recommend_products(
+        self,
+        face_attributes: Dict[str, Any],
+        customer_id: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.get_recommendations(face_attributes, customer_id, top_k)
 
-        # Age-based filtering
-        if age_group in ["18-25", "26-35"]:
-            # Young adults: prefer snacks, beverages, instant food
-            preferred_categories = ["Snack", "Beverage", "Instant Food"]
-        elif age_group in ["36-45", "46-60"]:
-            # Middle-aged: prefer dairy, personal care
-            preferred_categories = ["Dairy", "Personal Care", "Beverage"]
-        else:
-            # Seniors: prefer dairy, personal care
-            preferred_categories = ["Dairy", "Personal Care"]
+    def _get_cloud_customer_recommendations(
+        self, customer_id: str, top_k: int
+    ) -> List[Dict[str, Any]]:
+        cache_key = f"edge:recommend:{self.branch_id}:{customer_id}:{top_k}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-        # Gender-based adjustments
-        if gender == "Female":
-            # Boost personal care products
-            preferred_categories.insert(0, "Personal Care")
-
-        # Filter and score products
-        scored_products = []
-        for product in self.products:
-            score = product["popularity"]
-
-            # Boost score if in preferred category
-            if product["category"] in preferred_categories:
-                score *= 1.5
-
-            # Add some randomness for diversity
-            score *= random.uniform(0.8, 1.2)
-
-            scored_products.append(
-                {
-                    "product_id": product["id"],
-                    "product_name": product["name"],
-                    "category": product["category"],
-                    "price": product["price"],
-                    "score": score,
-                    "reason": self._generate_reason(product, face_attributes),
-                }
-            )
-
-        # Sort by score and take top K
-        scored_products.sort(key=lambda x: x["score"], reverse=True)
-        recommendations = scored_products[:top_k]
-
-        # Cache recommendations
-        if customer_id:
-            self._cache_recommendations(customer_id, recommendations)
-
-        return recommendations
-
-    def _generate_reason(self, product: Dict, attributes: Dict) -> str:
-        """Generate human-readable recommendation reason"""
-        reasons = [
-            f"Phổ biến với nhóm tuổi {attributes.get('age_group', 'của bạn')}",
-            f"Sản phẩm bán chạy tại {self.branch_id}",
-            "Khuyến mãi đặc biệt hôm nay",
-            "Thường mua cùng với sản phẩm khác",
-            "Xu hướng mua sắm gần đây",
-        ]
-        return random.choice(reasons)
-
-    def _get_cached_recommendations(self, customer_id: str):
-        """Get cached recommendations from Redis"""
         try:
-            cache_key = f"rec:{customer_id}"
-            cached = self.redis_client.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except Exception as e:
-            print(f"Redis cache error: {e}")
-        return None
-
-    def _cache_recommendations(self, customer_id: str, recommendations: List[Dict]):
-        """Cache recommendations to Redis (TTL: 1 hour)"""
-        try:
-            cache_key = f"rec:{customer_id}"
-            self.redis_client.setex(
-                cache_key, 3600, json.dumps(recommendations)  # 1 hour
+            resp = requests.get(
+                f"{self.cloud_api}/recommend",
+                params={
+                    "branch_id": self.branch_id,
+                    "customer_id": customer_id,
+                    "top_k": top_k,
+                },
+                timeout=min(self.timeout, 5.0),
             )
-        except Exception as e:
-            print(f"Redis cache error: {e}")
+            resp.raise_for_status()
+            data = resp.json() or []
+            recommendations = [self._normalize_product(p, idx) for idx, p in enumerate(data)]
+            self._cache_set(cache_key, recommendations, ttl=60)
+            return recommendations
+        except Exception as exc:
+            logger.info("Cloud customer recommendations unavailable: %s", exc)
+            return []
+
+    def _load_product_catalog(self) -> List[dict]:
+        now = time.time()
+        cache_time, cached = self._catalog_cache
+        if cached and now - cache_time < self.catalog_ttl:
+            return cached
+
+        redis_key = f"edge:products:{self.branch_id}"
+        redis_cached = self._cache_get(redis_key)
+        if redis_cached is not None:
+            self._catalog_cache = (now, redis_cached)
+            return redis_cached
+
+        try:
+            resp = requests.get(
+                f"{self.cloud_api}/products",
+                params={"limit": 500},
+                timeout=min(self.timeout, 8.0),
+            )
+            resp.raise_for_status()
+            products = resp.json() or []
+        except Exception as exc:
+            logger.warning("Could not load cloud products, using empty catalog: %s", exc)
+            products = []
+
+        normalized = [self._normalize_product(p, idx) for idx, p in enumerate(products)]
+        self._catalog_cache = (now, normalized)
+        self._cache_set(redis_key, normalized, ttl=self.catalog_ttl)
+        return normalized
+
+    def _rank_catalog_for_attributes(
+        self, products: List[dict], attributes: Dict[str, Any], top_k: int
+    ) -> List[Dict[str, Any]]:
+        scored = []
+        for idx, product in enumerate(products):
+            score, reasons = self._score_product(product, attributes)
+            if score <= 0:
+                score = max(0.01, float(product.get("stock") or 0) / 1000.0)
+            item = {
+                **product,
+                "score": round(score, 6),
+                "reason": ", ".join(reasons) if reasons else "Sản phẩm đang có sẵn tại cửa hàng",
+                "source": "edge_attribute_ranker",
+            }
+            scored.append((score, -idx, item))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [item for _score, _idx, item in scored[:top_k]]
+
+    def _score_product(self, product: Dict[str, Any], attributes: Dict[str, Any]) -> tuple[float, List[str]]:
+        score = 0.0
+        reasons: List[str] = []
+
+        gender = str(
+            attributes.get("gender")
+            or attributes.get("gender_label")
+            or ""
+        ).lower()
+        target_gender = str(product.get("target_gender") or "unisex").lower()
+        if gender:
+            if target_gender == gender:
+                score += 0.45
+                reasons.append("phù hợp giới tính")
+            elif target_gender in {"unisex", "all", "any"}:
+                score += 0.22
+                reasons.append("phù hợp mọi khách hàng")
+
+        age = attributes.get("age")
+        try:
+            age = int(age) if age is not None else None
+        except (TypeError, ValueError):
+            age = None
+        if _age_group_matches(product.get("target_age_group"), age):
+            score += 0.35
+            reasons.append("phù hợp độ tuổi")
+
+        emotion = str(
+            attributes.get("emotion")
+            or attributes.get("emotion_label")
+            or ""
+        ).lower()
+        product_emotion = str(product.get("emotion") or "").lower()
+        if emotion and product_emotion and product_emotion == emotion:
+            score += 0.25
+            reasons.append("phù hợp cảm xúc")
+
+        if product.get("has_discount"):
+            score += 0.12
+            reasons.append("đang có ưu đãi")
+
+        stock = int(product.get("stock") or 0)
+        score += min(stock, 200) / 2000.0
+
+        return score, reasons
+
+    def _normalize_product(self, product: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        price = float(product.get("price") or 0)
+        discount_price = product.get("discount_price")
+        discount_price = float(discount_price) if discount_price is not None else None
+        has_discount = bool(discount_price and price and discount_price < price)
+
+        return {
+            "id": product.get("id") or product.get("product_pk") or idx,
+            "product_pk": product.get("product_pk") or product.get("id"),
+            "product_id": product.get("product_id")
+            or product.get("product_code")
+            or str(product.get("id") or idx),
+            "product_code": product.get("product_code")
+            or product.get("product_id")
+            or str(product.get("id") or idx),
+            "product_name": product.get("product_name") or product.get("name") or "Sản phẩm",
+            "name": product.get("name") or product.get("product_name") or "Sản phẩm",
+            "category": product.get("category") or "Khác",
+            "price": discount_price if has_discount else price,
+            "original_price": price,
+            "discount_price": discount_price,
+            "discount_percent": product.get("discount_percent"),
+            "has_discount": has_discount,
+            "stock": int(product.get("branch_stock") or product.get("stock") or 0),
+            "image_url": product.get("image_url"),
+            "target_gender": product.get("target_gender") or "unisex",
+            "target_age_group": product.get("target_age_group") or "all",
+            "emotion": product.get("emotion") or "neutral",
+            "usage_context": product.get("usage_context") or "",
+        }
+
+    def _cache_get(self, key: str):
+        if not self.redis_client:
+            return None
+        try:
+            raw = self.redis_client.get(key)
+            return json.loads(raw) if raw else None
+        except Exception as exc:
+            logger.debug("Redis get failed for %s: %s", key, exc)
+            return None
+
+    def _cache_set(self, key: str, value: Any, ttl: int):
+        if not self.redis_client:
+            return
+        try:
+            self.redis_client.setex(key, ttl, json.dumps(value))
+        except Exception as exc:
+            logger.debug("Redis set failed for %s: %s", key, exc)
 
     def update_model(self, model_path: str):
-        """Update recommendation model from cloud server"""
-        # In production, this would load new model weights
-        # For simulation, we just log the update
-        print(f"Model updated from: {model_path}")
+        logger.info("Recommendation model update requested: %s", model_path)

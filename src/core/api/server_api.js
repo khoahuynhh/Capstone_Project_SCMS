@@ -24,12 +24,19 @@ async function request(path, options = {}) {
     headers["Content-Type"] = "application/json";
   }
 
-  const resp = await fetch(url, {
-    credentials: "include", // Use cookie/session (if backend set httpOnly cookie)
-    ...options,
-    method,
-    headers,
-  });
+  let resp;
+  try {
+    resp = await fetch(url, {
+      credentials: "include", // Use cookie/session (if backend set httpOnly cookie)
+      ...options,
+      method,
+      headers,
+    });
+  } catch (error) {
+    throw new Error(
+      `Không kết nối được Cloud API (${url}). Kiểm tra service cloud đang chạy, VITE_SERVER_API_BASE và CORS. ${error?.message || ""}`.trim()
+    );
+  }
 
   // Parse error message if response not ok
   if (!resp.ok) {
@@ -143,6 +150,18 @@ export const serverApi = {
   relatedProducts: (productId, limit = 5) => {
     return request(`/products/${encodeURIComponent(productId)}/related?limit=${limit}`);
   },
+  recommendationsByAttributes: ({ age, ageGroup, gender, emotion, branchId, topK = 20 } = {}) =>
+    request("/recommendations/by-attributes", {
+      method: "POST",
+      body: JSON.stringify({
+        age,
+        age_group: ageGroup,
+        gender,
+        emotion,
+        branch_id: branchId,
+        top_k: topK,
+      }),
+    }),
   updateProfile: (data) =>
   request("/auth/me", {
     method: "PATCH",

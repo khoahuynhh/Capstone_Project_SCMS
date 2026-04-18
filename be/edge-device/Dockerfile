@@ -24,4 +24,4 @@ COPY . .
 # Create directories
 RUN mkdir -p /app/data/transactions /app/data/embeddings /app/models
 
-CMD ["python", "main.py"]
+CMD ["uvicorn", "edge_api:app", "--host", "0.0.0.0", "--port", "8001"]

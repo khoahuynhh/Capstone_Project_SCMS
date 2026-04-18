@@ -47,6 +47,7 @@ class MQTTClient:
                 {
                     "event_type": "edge_offline",
                     "branch_id": self.branch_id,
+                    "device_id": os.getenv("DEVICE_ID", "device_1"),
                     "timestamp": time.time(),
                 }
             ),
@@ -186,6 +187,7 @@ class MQTTClient:
         event_data = {
             "event_type": event_type,
             "branch_id": self.branch_id,
+            "device_id": os.getenv("DEVICE_ID", "device_1"),
             "data": data,
         }
         return self._publish(self.topics["events"], event_data)

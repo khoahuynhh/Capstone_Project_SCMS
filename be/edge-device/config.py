@@ -5,7 +5,7 @@ Loads settings from environment variables with sensible defaults
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class EdgeSettings(BaseSettings):
@@ -19,14 +19,21 @@ class EdgeSettings(BaseSettings):
     )
     
     # Device Identity
-    BRANCH_ID: str = Field(default="branch_001")
-    BRANCH_NAME: str = Field(default="Default Branch")
-    DEVICE_ID: str = Field(default="edge_001")
+    BRANCH_ID: str = Field(default="HCM_Q1")
+    BRANCH_NAME: str = Field(default="Mart Quan 1")
+    DEVICE_ID: str = Field(default="EDGE_HCM_Q1_01")
     
     # Application
     APP_NAME: str = "Edge AI Retail - Edge Device"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = Field(default=False)
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def normalize_debug(cls, value):
+        if isinstance(value, str) and value.lower() in {"release", "prod", "production"}:
+            return False
+        return value
     
     # Server
     API_HOST: str = Field(default="0.0.0.0")

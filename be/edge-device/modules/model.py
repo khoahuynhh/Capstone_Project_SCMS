@@ -39,11 +39,6 @@ class Logger(object):
         pass
 
 
-# Redirect print → both console and file
-os.makedirs("./outputs", exist_ok=True)
-sys.stdout = Logger("./outputs/training.log")
-
-
 # Set seeds for consistency
 def seed_everything(seed):
     random.seed(seed)
@@ -830,6 +825,7 @@ def eval_one_epoch_attr(model, dataloader, device):
 def main():
     # Create output directory
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+    sys.stdout = Logger(os.path.join(Config.OUTPUT_DIR, "training.log"))
 
     # Initialize TensorBoard writer
     log_dir = os.path.join(

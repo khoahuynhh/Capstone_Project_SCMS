@@ -14,7 +14,7 @@ export default function EdgeScanPage() {
   const [stage, setStage] = useState("idle"); // idle | scanning | scanned | recommending
   const [error, setError] = useState("");
 
-  const [attrs, setAttrs] = useState(null); // { gender, age, emotion }
+  const [attrs, setAttrs] = useState(null); // { gender, age, age_group, emotion }
   const [previewUrl, setPreviewUrl] = useState("");
 
   const statusText = useMemo(() => {
@@ -80,12 +80,18 @@ export default function EdgeScanPage() {
   };
 
   const normalizeAttrs = (raw) => {
-    const gender = raw?.gender;
-    const emotion = raw?.emotion;
-    const age = Number(raw?.age);
+    const source = raw?.face_attributes || raw?.attributes || raw;
+    const gender = source?.gender;
+    const emotion = source?.emotion;
+    const age = Number(source?.age);
 
     if (!gender || !emotion || Number.isNaN(age)) return null;
-    return { gender, emotion, age: Math.round(age) };
+    return {
+      gender: String(gender).toLowerCase(),
+      emotion: String(emotion).toLowerCase(),
+      age: Math.round(age),
+      age_group: source?.age_group,
+    };
   };
 
   const handleScanOnce = async () => {

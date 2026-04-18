@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { X, Search, CreditCard, Plus, Minus, Sparkles, User, Brain } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
+import { serverApi } from '../../../core/api/server_api';
 import '../css/ProductRecommendation.css';
 import PaymentInterface from './PaymentInterface';
 
@@ -10,8 +11,8 @@ const mapDbProductToUi = (p) => {
     const discountPrice = p.discount_price ? Number(p.discount_price) : null;
     
     return {
-        id: String(p.id ?? p.product_id),
-        productCode: p.product_code,
+        id: String(p.id ?? p.product_pk ?? p.product_id),
+        productCode: p.product_code || p.product_id,
         name: p.name || "Sản phẩm",
         category: (p.category || "Khác").toLowerCase(),
         originalPrice,
@@ -36,16 +37,49 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const [cart, setCart] = useState([]);
     const [searchTerm, setSearchTerm] = useState('');
     const { products: dbProducts, isLoading } = useProducts();
+    const [cloudRecommendations, setCloudRecommendations] = useState([]);
+    const [loadingRecommendations, setLoadingRecommendations] = useState(false);
     const [selectedProduct, setSelectedProduct] = useState(null);
     const [showPayment, setShowPayment] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen || !aiContext) {
+            setCloudRecommendations([]);
+            return;
+        }
+
+        setLoadingRecommendations(true);
+        serverApi.recommendationsByAttributes({
+            age: aiContext.age,
+            ageGroup: aiContext.age_group,
+            gender: aiContext.gender,
+            emotion: aiContext.emotion,
+            branchId: import.meta.env.VITE_BRANCH_ID || 'HCM_Q1',
+            topK: 50,
+        })
+            .then((data) => setCloudRecommendations(data?.products || []))
+            .catch((error) => {
+                console.error('Lỗi tải gợi ý theo AI context:', error);
+                setCloudRecommendations([]);
+            })
+            .finally(() => setLoadingRecommendations(false));
+    }, [isOpen, aiContext]);
 
     // --- AI LOGIC: Tính toán độ phù hợp (Scoring Engine) ---
     const displayProducts = useMemo(() => {
         if (!dbProducts) return [];
         let list = dbProducts.map(mapDbProductToUi);
+        const cloudList = Array.isArray(cloudRecommendations)
+            ? cloudRecommendations.map(mapDbProductToUi)
+            : [];
 
         if (searchTerm) {
             list = list.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()));
+        }
+
+        if (cloudList.length > 0 && !searchTerm) {
+            const seen = new Set(cloudList.map((p) => p.id));
+            return [...cloudList, ...list.filter((p) => !seen.has(p.id))];
         }
 
         return list.sort((a, b) => {
@@ -97,7 +131,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
 
             return getScore(b) - getScore(a); 
         });
-    }, [dbProducts, searchTerm, aiContext]);
+    }, [dbProducts, searchTerm, aiContext, cloudRecommendations]);
 
     const cartTotal = cart.reduce((sum, item) => sum + (item.finalPrice * item.quantity), 0);
     const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
@@ -180,7 +214,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                             />
                         </div>
 
-                        {isLoading ? (
+                        {isLoading || loadingRecommendations ? (
                             <div style={{ padding: '20px', textAlign: 'center' }}>Đang tải dữ liệu sản phẩm...</div>
                         ) : (
                             <div className="recoGrid">

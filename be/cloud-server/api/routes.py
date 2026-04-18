@@ -116,6 +116,15 @@ class TransactionSummary(BaseModel):
     total_amount: float
 
 
+class AttributeRecommendationBody(BaseModel):
+    age: Optional[int] = None
+    age_group: Optional[str] = None
+    gender: Optional[str] = None
+    emotion: Optional[str] = None
+    branch_id: Optional[str] = None
+    top_k: int = 20
+
+
 class UpdateProfileBody(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -882,6 +891,10 @@ def list_products(
             "stock": p.stock,
             "description": p.description,
             "image_url": p.image_url,
+            "target_gender": p.target_gender,
+            "target_age_group": p.target_age_group,
+            "emotion": p.emotion,
+            "usage_context": p.usage_context,
         }
         for p in items
     ]
@@ -922,6 +935,112 @@ def get_related_products(
 
     # Trả về danh sách (FastAPI sẽ tự động chuyển thành JSON)
     return recommended_products
+
+
+def _attribute_age_match(product_group: Optional[str], age: Optional[int], age_group: Optional[str]) -> bool:
+    if not product_group or product_group.lower() in {"all", "any", "unisex"}:
+        return True
+
+    target = product_group.strip().upper().replace("-", "_")
+    if age_group and target == age_group.strip().upper().replace("-", "_"):
+        return True
+
+    if age is None:
+        return False
+
+    if "_" in target:
+        try:
+            lo, hi = [int(x) for x in target.split("_", 1)]
+            return lo <= age <= hi
+        except ValueError:
+            return False
+
+    if target.endswith("_PLUS") or target.endswith("+"):
+        try:
+            lo = int(target.replace("_PLUS", "").replace("+", ""))
+            return age >= lo
+        except ValueError:
+            return False
+
+    return False
+
+
+def _product_response(p: Product) -> dict:
+    return {
+        "id": p.id,
+        "product_code": p.product_code,
+        "name": p.name,
+        "volume": p.volume,
+        "price": p.price,
+        "discount_price": p.discount_price,
+        "discount_percent": p.discount_percent,
+        "category": p.category,
+        "stock": p.stock,
+        "description": p.description,
+        "image_url": p.image_url,
+        "target_gender": p.target_gender,
+        "target_age_group": p.target_age_group,
+        "emotion": p.emotion,
+        "usage_context": p.usage_context,
+    }
+
+
+@router.post("/recommendations/by-attributes")
+def recommend_by_attributes(
+    body: AttributeRecommendationBody,
+    db: Session = Depends(get_db),
+):
+    gender = (body.gender or "").strip().lower()
+    emotion = (body.emotion or "").strip().lower()
+    top_k = max(1, min(int(body.top_k or 20), 100))
+
+    products = db.query(Product).filter(Product.stock > 0).all()
+
+    scored = []
+    for idx, product in enumerate(products):
+        score = 0.0
+        reasons = []
+
+        target_gender = (product.target_gender or "unisex").strip().lower()
+        if gender:
+            if target_gender == gender:
+                score += 50
+                reasons.append("gender")
+            elif target_gender in {"unisex", "all", "any"}:
+                score += 25
+                reasons.append("unisex")
+
+        if _attribute_age_match(product.target_age_group, body.age, body.age_group):
+            score += 40
+            reasons.append("age_group")
+
+        product_emotion = (product.emotion or "").strip().lower()
+        if emotion and product_emotion and product_emotion == emotion:
+            score += 30
+            reasons.append("emotion")
+
+        if product.discount_price and product.price and product.discount_price < float(product.price):
+            score += 12
+            reasons.append("promotion")
+
+        score += min(int(product.stock or 0), 200) / 20
+
+        payload = _product_response(product)
+        payload["recommendation_score"] = round(score, 3)
+        payload["recommendation_reasons"] = reasons
+        scored.append((score, -idx, payload))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return {
+        "branch_id": body.branch_id,
+        "attributes": {
+            "age": body.age,
+            "age_group": body.age_group,
+            "gender": body.gender,
+            "emotion": body.emotion,
+        },
+        "products": [payload for _score, _idx, payload in scored[:top_k]],
+    }
 
 
 @router.post("/products/upload-excel")

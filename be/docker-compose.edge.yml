@@ -1,0 +1,17 @@
+services:
+  edge-device:
+    build:
+      context: ./edge-device
+      dockerfile: Dockerfile
+    container_name: edge-device
+    env_file:
+      - ./edge-device/.env
+    ports:
+      - "${EDGE_API_PORT:-8001}:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./edge-device:/app
+      - ./data:/app/data
+    restart: unless-stopped
+    command: uvicorn edge_api:app --host 0.0.0.0 --port 8001 --reload

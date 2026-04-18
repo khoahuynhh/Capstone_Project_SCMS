@@ -8,7 +8,14 @@ const edgeBaseUrl = getEdgeBaseUrl();
 
 async function request(path, options = {}) {
   const url = `${edgeBaseUrl}${path}`;
-  const resp = await fetch(url, options);
+  let resp;
+  try {
+    resp = await fetch(url, options);
+  } catch (error) {
+    throw new Error(
+      `Không kết nối được Edge API (${url}). Kiểm tra service edge đang chạy và VITE_EDGE_API_BASE. ${error?.message || ""}`.trim()
+    );
+  }
 
   const contentType = resp.headers.get("content-type") || "";
 

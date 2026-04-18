@@ -108,8 +108,9 @@ services:
       dockerfile: Dockerfile
     container_name: edge-branch-1
     environment:
-      - BRANCH_ID=branch_001
-      - BRANCH_NAME=Chi nhánh Quận 1
+      - BRANCH_ID=HCM_Q1
+      - BRANCH_NAME=Mart Quan 1
+      - DEVICE_ID=EDGE_HCM_Q1_01
       - MQTT_BROKER=mosquitto:1883
       - CLOUD_API=http://cloud-server:8000
       - REDIS_URL=redis://redis:6379
@@ -122,7 +123,7 @@ services:
       - redis
     networks:
       - edge-network
-    command: python main.py
+    command: uvicorn edge_api:app --host 0.0.0.0 --port 8001 --reload
     ports:
       - "8001:8001"
 
@@ -133,8 +134,9 @@ services:
       dockerfile: Dockerfile
     container_name: edge-branch-2
     environment:
-      - BRANCH_ID=branch_002
-      - BRANCH_NAME=Chi nhánh Quận 7
+      - BRANCH_ID=HCM_Q7
+      - BRANCH_NAME=Mart Quan 7
+      - DEVICE_ID=EDGE_HCM_Q7_01
       - MQTT_BROKER=mosquitto:1883
       - CLOUD_API=http://cloud-server:8000
       - REDIS_URL=redis://redis:6379
@@ -147,7 +149,7 @@ services:
       - redis
     networks:
       - edge-network
-    command: python main.py
+    command: uvicorn edge_api:app --host 0.0.0.0 --port 8001 --reload
     ports:
       - "8002:8001"
 
