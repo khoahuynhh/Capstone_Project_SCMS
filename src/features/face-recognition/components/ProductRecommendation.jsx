@@ -1,4 +1,4 @@
-import React, { useState, useMemo} from 'react';
+import React, { useState, useMemo, useEffect, useRef} from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, ShoppingCart, Search, CreditCard, Plus, Minus, Trash2, Package, LogOut, ArrowLeft } from 'lucide-react';
 import { History as HistoryIcon } from 'lucide-react';
@@ -10,6 +10,16 @@ import { useCustomerHistory } from '../hooks/useCustomerHistory';
 import '../css/ProductRecommendation.css';
 import PaymentInterface from './PaymentInterface';
 import CustomerProfile from './CustomerProfile';
+
+const getRecommendationSessionId = () => {
+    const key = 'fbrs_recommendation_session_id';
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+
+    const sessionId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.sessionStorage.setItem(key, sessionId);
+    return sessionId;
+};
 
 // --- HELPER: Map data DB -> UI ---
 const mapDbProductToUi = (p) => {
@@ -63,6 +73,13 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     const [selectedProduct, setSelectedProduct] = useState(null);
     const [historyStack, setHistoryStack] = useState([]);
     const [showPayment, setShowPayment] = useState(false);
+    const sessionIdRef = useRef(null);
+    const trackedImpressionsRef = useRef(new Set());
+    const trackedAcceptancesRef = useRef(new Set());
+
+    if (!sessionIdRef.current && typeof window !== 'undefined') {
+        sessionIdRef.current = getRecommendationSessionId();
+    }
 
     // --- LOGIC TÍNH TOÁN ---
     const purchaseStats = useMemo(() => {
@@ -143,9 +160,95 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
 
     const cartTotal = cart.reduce((sum, item) => sum + (item.finalPrice * item.quantity), 0);
     const formatMoney = (n) => n.toLocaleString('vi-VN') + 'đ';
+    const branchId = customer?.preferred_branch || import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
+    const deviceId = import.meta.env.VITE_DEVICE_ID || null;
+    const customerId = customer?.id ? Number(customer.id) : null;
+
+    const sendRecommendationEvents = (events) => {
+        if (!events.length) return;
+        for (let i = 0; i < events.length; i += 100) {
+            serverApi.recommendationEvents(events.slice(i, i + 100)).catch((error) => {
+                console.error('Lỗi ghi recommendation event:', error);
+            });
+        }
+    };
+
+    const buildRecommendationEvent = (eventType, product, position, surface, algorithm) => ({
+        event_type: eventType,
+        product_id: Number(product.id),
+        customer_id: customerId,
+        branch_id: branchId,
+        device_id: deviceId,
+        surface,
+        algorithm,
+        position,
+        session_id: sessionIdRef.current,
+    });
+
+    const getRecommendationAttribution = (product) => ({
+        surface: product.recommendationSurface || 'customer_recommendation',
+        algorithm: product.recommendationAlgorithm || 'purchase_history_sort',
+        position: product.recommendationPosition ?? null,
+    });
+
+    useEffect(() => {
+        if (!isOpen || showPayment || loadingProducts || displayProducts.length === 0) return;
+
+        const events = [];
+        displayProducts.forEach((product, index) => {
+            const position = index + 1;
+            const key = `customer_recommendation:${searchTerm || 'default'}:${product.id}:${position}`;
+            if (trackedImpressionsRef.current.has(key)) return;
+            trackedImpressionsRef.current.add(key);
+            events.push(buildRecommendationEvent(
+                'impression',
+                product,
+                position,
+                'customer_recommendation',
+                'purchase_history_sort',
+            ));
+        });
+
+        sendRecommendationEvents(events);
+    }, [isOpen, showPayment, loadingProducts, displayProducts, searchTerm]);
+
+    useEffect(() => {
+        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) return;
+
+        const events = [];
+        relatedProducts.forEach((product, index) => {
+            const position = index + 1;
+            const key = `related_products:${selectedProduct.id}:${product.id}:${position}`;
+            if (trackedImpressionsRef.current.has(key)) return;
+            trackedImpressionsRef.current.add(key);
+            events.push(buildRecommendationEvent(
+                'impression',
+                product,
+                position,
+                'related_products',
+                'association_rules',
+            ));
+        });
+
+        sendRecommendationEvents(events);
+    }, [isOpen, showPayment, selectedProduct, relatedProducts]);
 
     // --- ACTIONS ---
     const addToCart = (product) => {
+        const attribution = getRecommendationAttribution(product);
+        const acceptanceKey = `${attribution.surface}:${product.id}`;
+        if (!trackedAcceptancesRef.current.has(acceptanceKey)) {
+            trackedAcceptancesRef.current.add(acceptanceKey);
+            sendRecommendationEvents([
+                buildRecommendationEvent(
+                    'add_to_cart',
+                    product,
+                    attribution.position,
+                    attribution.surface,
+                    attribution.algorithm,
+                ),
+            ]);
+        }
         setCart(prev => {
             const idx = prev.findIndex(p => p.id === product.id);
             if (idx > -1) {
@@ -190,11 +293,19 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     };
 
     // Hàm 1: Khi bấm vào một sản phẩm liên quan
-    const handleSelectRelatedProduct = (rp) => {
+    const handleSelectRelatedProduct = (rp, position) => {
+        sendRecommendationEvents([
+            buildRecommendationEvent('click', rp, position, 'related_products', 'association_rules'),
+        ]);
         // Đẩy sản phẩm "hiện tại" vào cuối mảng lịch sử (stack)
         setHistoryStack((prevStack) => [...prevStack, selectedProduct]);
         // Cập nhật sản phẩm mới để hiển thị
-        setSelectedProduct(rp);
+        setSelectedProduct({
+            ...rp,
+            recommendationSurface: 'related_products',
+            recommendationAlgorithm: 'association_rules',
+            recommendationPosition: position,
+        });
     };
 
     // Hàm 2: Khi bấm nút Quay lại (Back)
@@ -298,11 +409,27 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                                             <p style={{ fontSize: '0.8rem', lineHeight: 1.4, margin: 0, letterSpacing: '0.2px' }}>Không tìm thấy sản phẩm nào.</p>
                                         </div>
                                     ) : (
-                                        displayProducts.map(product => (
+                                        displayProducts.map((product, index) => (
                                             <div
                                                 key={product.id}
                                                 className="recoCard animate-fade-in"
-                                                onClick={() => setSelectedProduct(product)}
+                                                onClick={() => {
+                                                    sendRecommendationEvents([
+                                                        buildRecommendationEvent(
+                                                            'click',
+                                                            product,
+                                                            index + 1,
+                                                            'customer_recommendation',
+                                                            'purchase_history_sort',
+                                                        ),
+                                                    ]);
+                                                    setSelectedProduct({
+                                                        ...product,
+                                                        recommendationSurface: 'customer_recommendation',
+                                                        recommendationAlgorithm: 'purchase_history_sort',
+                                                        recommendationPosition: index + 1,
+                                                    });
+                                                }}
                                             >
                                                 <div className="recoCardImg">
                                                     <img
@@ -499,11 +626,11 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                                         <div className="related-products-status">Đang tải đề xuất...</div>
                                     ) : relatedProducts.length > 0 ? (
                                         <div className="related-products-list">
-                                            {relatedProducts.map(rp => (
+                                            {relatedProducts.map((rp, index) => (
                                                 <div 
                                                     key={rp.id} 
                                                     className="related-product-card"
-                                                    onClick={() => handleSelectRelatedProduct(rp)}
+                                                    onClick={() => handleSelectRelatedProduct(rp, index + 1)}
                                                     title={rp.name}
                                                 >
                                                     <img 

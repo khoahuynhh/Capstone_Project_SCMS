@@ -1,270 +1,171 @@
-# Start all services
+# Backend Services
 
-docker compose up -d
+This folder contains the backend runtime for FBRS:
 
-# Check logs
+- `cloud-server/`: FastAPI Cloud API for products, recommendations, transactions, analytics, authentication, and monitoring.
+- `edge-device/`: FastAPI Edge API for face attribute inference.
+- `docker-compose.cloud.yml`: production-style Cloud stack.
+- `docker-compose.edge.yml`: production-style Edge stack.
+- `docker-compose.yml`: legacy all-in-one local demo.
 
-docker compose logs -f cloud-server
+## Architecture
 
-# Access services:
+The backend is split by responsibility:
 
-# - Cloud API: http://localhost:8000
+| Surface | Responsibility |
+| --- | --- |
+| Cloud Server | Business data, product catalog, recommendations, transactions, users, analytics, metrics |
+| Edge Device | Run the face attribute model and return `age`, `age_group`, `gender`, `emotion` |
+| MQTT Broker | Receive edge status events such as `edge_online`, `edge_heartbeat`, and `edge_offline` |
+| PostgreSQL | Main persistent data store |
+| Redis | Cloud-side cache/runtime support |
+| Prometheus/Grafana | Metrics and dashboards |
 
-# - API Docs: http://localhost:8000/docs
+The UI calls Edge over HTTP for inference and calls Cloud over HTTP for recommendations and business operations. Edge does not render product recommendations and does not own product data.
 
-# - Grafana: http://localhost:3000 (admin/admin)
+## Compose Files
 
-# - Prometheus: http://localhost:9090
+### Cloud stack
 
-# Run server
+Use this on the server:
 
-uvicorn main:app --reload --host 0.0.0.0 --port 8002
-
-#### Edge Device
-
-````bash
-
-# Create virtual environment
-# Set environment variables
-export BRANCH_ID=branch_001
-export BRANCH_NAME="Chi nhánh 1"
-export MQTT_BROKER=localhost
-export CLOUD_API=http://localhost:8000
-
-### 2. Upload Model
-```bash
-# Upload face detector model
-curl -X POST "http://localhost:8000/api/v1/models/upload" \
-  -F "version=v1.0.0" \
-  -F "model_type=face_detector" \
-  -F "model_format=onnx" \
-  -F "file=@models/face_detector.onnx"
-
-# Upload recommender model
-curl -X POST "http://localhost:8000/api/v1/models/upload" \
-  -F "version=v1.0.0" \
-  -F "model_type=recommender" \
-  -F "model_format=onnx" \
-  -F "file=@models/recommender.onnx"
-````
-
-### 3. Deploy Model to Edge
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/models/deploy" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "version": "v1.0.0",
-    "target_branches": ["branch_001", "branch_002"]
-  }'
+```powershell
+docker compose -f docker-compose.cloud.yml up -d --build
 ```
 
-### 4. Create A/B Test
+Services:
 
-```bash
-curl -X POST "http://localhost:8000/api/v1/experiments/create" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "experiment_name": "New Recommendation Algorithm",
-    "variant_a": {"algorithm": "collaborative_filtering"},
-    "variant_b": {"algorithm": "deep_learning"},
-    "split_ratio": 0.5,
-    "target_metric": "ctr"
-  }'
+- `cloud-server` on host port `8000`.
+- `postgres-db` on host port `5433`.
+- `redis-cache` on host port `6379`.
+- `mqtt-broker` on host ports `1883` and `9001`.
+- `prometheus` on host port `9090`.
+- `grafana` on host port `3000`.
+
+### Edge stack
+
+Use this on Raspberry Pi or on a local machine for edge testing:
+
+```powershell
+docker compose -f docker-compose.edge.yml up -d --build
 ```
 
-### 5. Trigger Federated Learning
+Service:
 
-```bash
-curl -X POST "http://localhost:8000/api/v1/federated/aggregate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_type": "recommender",
-    "aggregation_method": "fedavg",
-    "min_clients": 2
-  }'
+- `edge-device` on host port `8001`.
+
+### Legacy all-in-one stack
+
+`docker-compose.yml` is kept only for older local demos. Do not use it as the main production deployment file.
+
+## Environment
+
+Create environment files:
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item edge-device\.env.docker.example edge-device\.env
 ```
 
----
+Cloud settings in `be/.env`:
 
-## API Documentation
-
-### Interactive API Docs
-
-Truy cập: http://localhost:8000/docs (Swagger UI)
-
-### Main Endpoints
-
-#### Transactions
-
-- `GET /api/v1/transactions` - List transactions
-- `GET /api/v1/transactions/{id}` - Get transaction details
-
-#### Model Management
-
-- `POST /api/v1/models/upload` - Upload model
-- `POST /api/v1/models/deploy` - Deploy model
-- `POST /api/v1/models/rollback` - Rollback model
-- `GET /api/v1/models/list` - List models
-- `GET /api/v1/models/active/{type}` - Get active model
-
-#### Privacy & Consent
-
-- `POST /api/v1/consent/opt-in` - Customer opt-in
-- `POST /api/v1/consent/opt-out` - Customer opt-out
-- `DELETE /api/v1/consent/data/{customer_id}` - Delete customer data (GDPR)
-- `GET /api/v1/consent/{customer_id}` - Get consent status
-
-#### A/B Testing
-
-- `POST /api/v1/experiments/create` - Create experiment
-- `POST /api/v1/experiments/{id}/start` - Start experiment
-- `GET /api/v1/experiments/{id}/results` - Get results
-- `POST /api/v1/experiments/{id}/conclude` - Conclude experiment
-
-#### Federated Learning
-
-- `POST /api/v1/federated/upload-update` - Upload client update
-- `POST /api/v1/federated/aggregate` - Trigger aggregation
-- `GET /api/v1/federated/status/{round}` - Get round status
-- `GET /api/v1/federated/history` - Get FL history
-
-#### Analytics
-
-- `GET /api/v1/analytics/ctr` - CTR metrics
-- `GET /api/v1/analytics/inventory-optimization` - Inventory recommendations
-- `GET /api/v1/analytics/model-performance` - Model performance over time
-- `GET /api/v1/analytics/demand-forecast` - Demand forecast
-- `GET /api/v1/analytics/top-products` - Top selling products
-
----
-
-## Cấu hình
-
-### Environment Variables (cloud-server/.env)
-
-```bash
-# Application
-DEBUG=False
-ENVIRONMENT=production
-PORT=8000
-
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/retail_db
-
-# Redis
-REDIS_URL=redis://localhost:6379
-
-# MQTT
+```env
+CLOUD_API_PORT=8000
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=change-this-password
+POSTGRES_DB=retail_db
+POSTGRES_HOST_PORT=5433
+DATABASE_URL=postgresql://admin:change-this-password@postgres:5432/retail_db
+REDIS_URL=redis://redis:6379
 MQTT_BROKER=mosquitto
 MQTT_PORT=1883
-
-# Federated Learning
-FL_AGGREGATION_INTERVAL_HOURS=24
-FL_MIN_CLIENTS=2
-FL_AGGREGATION_METHOD=fedavg  # fedavg, krum, trimmed_mean
-
-# Privacy
-DATA_RETENTION_DAYS=90
-FACE_IMAGE_RETENTION_HOURS=0
-GDPR_ENABLED=True
-
-# Security
-API_KEY_ENABLED=True
-JWT_SECRET_KEY=<your-secret-key>
-
-# Performance
-RECOMMENDATION_TIMEOUT_MS=200
-RECOMMENDATION_TOP_K=5
+JWT_SECRET_KEY=change-this-secret-key
+ADMIN_API_KEY=change-this-admin-key
 ```
 
-### Edge Device Config (edge-device/.env)
+Edge settings in `be/edge-device/.env`:
 
-```bash
-# Device Identity
-BRANCH_ID=branch_001
-BRANCH_NAME=Chi nhánh Quận 1
-DEVICE_ID=edge_001
-
-# Cloud Connection
-CLOUD_API=http://cloud-server:8000
-MQTT_BROKER=mosquitto
-
-# Performance
-INFERENCE_DEVICE=cpu  # cpu, cuda, tensorrt
-RECOMMENDATION_TIMEOUT_MS=200
-
-# Camera
-CAMERA_ENABLED=True
-CAMERA_MOCK=False  # Set to True for simulation
+```env
+BRANCH_ID=HCM_Q1
+BRANCH_NAME=Mart Quan 1
+DEVICE_ID=EDGE_HCM_Q1_01
+API_PORT=8001
+MODEL_STORAGE_PATH=./models
+INFERENCE_DEVICE=cpu
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL=60
+MQTT_BROKER=host.docker.internal
+MQTT_PORT=1883
 ```
 
----
+For Raspberry Pi deployment, replace `MQTT_BROKER=host.docker.internal` with the Cloud server IP or DNS name.
 
-## Monitoring
+## Health Checks
 
-### Grafana Dashboards
+Cloud:
 
-1. Access: http://localhost:3000
-2. Login: admin/admin
-3. Dashboards:
-   - **System Overview**: Total transactions, active branches, latency
-   - **Model Performance**: Precision@K, latency by branch
-   - **Federated Learning**: Round progress, client updates
-
-### Prometheus Metrics
-
-- `edge_inference_total` - Total inferences
-- `edge_inference_latency_seconds` - Inference latency histogram
-- `edge_recommendations_total` - Total recommendations
-- `edge_recommendations_accepted` - Accepted recommendations
-- `federated_learning_round_number` - Current FL round
-
-## Bảo mật & Privacy
-
-### Privacy Features
-
-- **Opt-in/Opt-out mechanism** tại quầy
-- **Face images không lưu** (chỉ embeddings)
-- **Data anonymization** cho analytics
-- **GDPR Right to be Forgotten** (DELETE /api/v1/consent/data/{id})
-- **Audit logs** cho mọi data access
-- **Data retention policies** (tự động xóa sau X ngày)
-
-### Security Best Practices
-
-1. Đổi `JWT_SECRET_KEY` trong production
-2. Enable HTTPS/TLS cho APIs
-3. Set `API_KEY_ENABLED=True` và tạo keys cho edge devices
-4. Restrict PostgreSQL access (không expose port 5432 ra ngoài)
-5. Regular security audits
-
----
-
-## Phát triển
-
-### Database Migrations
-
-```bash
-# Create migration
-alembic revision --autogenerate -m "Add new table"
-
-# Apply migration
-alembic upgrade head
-
-# Rollback
-alembic downgrade -1
+```powershell
+curl http://localhost:8000/health
+docker compose -f docker-compose.cloud.yml logs -f cloud-server
 ```
 
-### Running Tests
+Edge:
 
-```bash
-# Unit tests
-pytest tests/
-
-# Integration tests
-pytest tests/integration/
-
-# Coverage
-pytest --cov=cloud-server --cov-report=html
+```powershell
+curl http://localhost:8001/health
+docker compose -f docker-compose.edge.yml logs -f edge-device
 ```
+
+PostgreSQL:
+
+```powershell
+docker exec postgres-db psql -U admin -d retail_db -c "SELECT 1;"
+```
+
+Redis:
+
+```powershell
+docker exec redis-cache redis-cli ping
+```
+
+## Main APIs
+
+Cloud API:
+
+- `GET /health`
+- `GET /products`
+- `POST /recommendations/by-attributes`
+- `POST /transactions`
+- `GET /transactions`
+- `GET /branches`
+- `GET /metrics/summary`
+- `GET /metrics`
+
+Edge API:
+
+- `GET /health`
+- `GET /metrics`
+- `POST /face/analysis`
+
+## Database Backup
+
+Create a PostgreSQL backup from the running `postgres-db` container:
+
+```powershell
+python cloud-server\scripts\export_postgres.py
+```
+
+Restore a plain SQL backup:
+
+```powershell
+Get-Content .\cloud-server\data\backups\<backup-file>.sql | docker exec -i postgres-db psql -U admin -d retail_db
+```
+
+Do not use `docker compose down -v` unless you intentionally want to delete Docker volumes.
+
+## Development Notes
+
+- Current Edge production entrypoint: `uvicorn edge_api:app --host 0.0.0.0 --port 8001`.
+- `edge-device/main.py` is legacy simulation code.
+- Redis is used by the Cloud stack, not by the Edge stack.
+- Model artifacts such as `*.pth`, `*.pt`, `*.onnx`, and `*.ckpt` should be copied to runtime environments manually, not committed to Git.

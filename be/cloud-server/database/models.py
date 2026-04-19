@@ -125,7 +125,6 @@ class Transaction(Base):
 
     # Recommendation context
     recommended_items = Column(JSON)  # What was recommended
-    accepted_recommendations = Column(Boolean, default=False)
 
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -161,12 +160,44 @@ class Recommendation(Base):
     recommended_products = Column(JSON)  # List of recommended products
     items_count = Column(Integer)
 
-    # Outcome
-    accepted = Column(Boolean, default=False)
-    purchased_items = Column(JSON)
-
     # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RecommendationEvent(Base):
+    """Fine-grained events used to calculate recommendation CTR."""
+
+    __tablename__ = "recommendation_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(32), index=True, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True, nullable=False)
+    customer_id = Column(Integer, ForeignKey("customers.id"), index=True, nullable=True)
+    branch_id = Column(String(50), ForeignKey("stores.id"), index=True, nullable=True)
+    device_id = Column(String(50), ForeignKey("edge_devices.id"), index=True, nullable=True)
+    surface = Column(String(80), index=True, nullable=False)
+    algorithm = Column(String(80), nullable=True)
+    position = Column(Integer, nullable=True)
+    session_id = Column(String(100), index=True, nullable=True)
+    recommendation_id = Column(
+        Integer, ForeignKey("recommendations.id"), index=True, nullable=True
+    )
+    event_metadata = Column(JSON, nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    product = relationship("Product")
+    customer = relationship("Customer")
+    recommendation = relationship("Recommendation")
+
+    __table_args__ = (
+        Index("ix_recommendation_events_type_time", "event_type", "timestamp"),
+        Index(
+            "ix_recommendation_events_surface_time",
+            "surface",
+            "timestamp",
+        ),
+    )
 
 
 class UserAccount(Base):
@@ -265,8 +296,6 @@ class BranchMetrics(Base):
 
     # Recommendation metrics
     total_recommendations = Column(Integer, default=0)
-    recommendations_accepted = Column(Integer, default=0)
-    acceptance_rate = Column(Float, default=0)
 
     # Performance metrics
     avg_latency_ms = Column(Float)

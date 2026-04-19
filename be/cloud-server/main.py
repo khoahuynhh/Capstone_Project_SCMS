@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
+from sqlalchemy import text
 from api import routes
 from config import settings
 from services.mqtt_cloud import MQTTSubscriber
@@ -101,14 +102,17 @@ async def root():
 @app.get("/health")
 async def health_check():
     db_ok = False
+    db = None
     try:
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db_ok = True
-    except:
+    except Exception:
+        logger.exception("Database health check failed")
         db_ok = False
     finally:
-        db.close()
+        if db:
+            db.close()
 
     return {
         "status": "healthy",

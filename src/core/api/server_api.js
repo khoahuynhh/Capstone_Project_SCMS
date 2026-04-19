@@ -150,6 +150,11 @@ export const serverApi = {
   relatedProducts: (productId, limit = 5) => {
     return request(`/products/${encodeURIComponent(productId)}/related?limit=${limit}`);
   },
+  recommendationEvents: (events) =>
+    request("/recommendation-events", {
+      method: "POST",
+      body: JSON.stringify({ events }),
+    }),
   recommendationsByAttributes: ({ age, ageGroup, gender, emotion, branchId, topK = 20 } = {}) =>
     request("/recommendations/by-attributes", {
       method: "POST",
@@ -201,6 +206,14 @@ analyticsInventoryAlerts: ({ branchId, threshold = 5 } = {}) => {
   params.set("threshold", String(threshold));
   if (branchId) params.set("branch_id", branchId);
   return request(`/api/v1/analytics/dashboard/inventory-alerts?${params.toString()}`);
+},
+
+analyticsBranchInventory: ({ branchId, threshold = 5, limit = 15 } = {}) => {
+  const params = new URLSearchParams();
+  params.set("threshold", String(threshold));
+  params.set("limit", String(limit));
+  if (branchId) params.set("branch_id", branchId);
+  return request(`/api/v1/analytics/dashboard/branch-inventory?${params.toString()}`);
 },
 
 analyticsCustomerSegments: ({ branchId } = {}) => {

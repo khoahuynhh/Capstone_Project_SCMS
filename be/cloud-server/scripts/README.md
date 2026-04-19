@@ -1,27 +1,72 @@
-## Cloud-Server Utility Scripts
+# Cloud Server Utility Scripts
 
-### `seed_data.py`
-Populate the connected database (PostgreSQL by default) with a tiny demo dataset:
+Utility scripts for database seeding and PostgreSQL backup.
 
-```bash
-python be/cloud-server/scripts/seed_data.py
+Run scripts from the repository root or from the `be/` folder. The examples below use PowerShell paths.
+
+## `seed_data.py`
+
+Populate the configured PostgreSQL database with demo data:
+
+```powershell
+python be\cloud-server\scripts\seed_data.py
 ```
 
-### `export_postgres_to_sqlite.py`
-Dump your live PostgreSQL database into an on-disk SQLite file so you can ship it with the submission:
+The script reads `DATABASE_URL` from the environment. When running through Docker Compose, the Cloud server uses the database URL defined in `be/.env` and `docker-compose.cloud.yml`.
 
-```bash
-python be/cloud-server/scripts/export_postgres_to_sqlite.py \
-  --postgres-url postgresql://admin:admin123@localhost:5432/retail_db \
-  --sqlite-path demo_data/demo.sqlite \
-  --overwrite
+## `export_postgres.py`
+
+Create a PostgreSQL backup from the running `postgres-db` Docker container using `pg_dump`.
+
+Default command:
+
+```powershell
+python be\cloud-server\scripts\export_postgres.py
 ```
 
-Flags:
+Default behavior:
 
-- `--postgres-url` (optional): defaults to `settings.DATABASE_URL` / `DATABASE_URL`.
-- `--sqlite-path`: where the SQLite file should be written (directories are created automatically).
-- `--batch-size`: tune insert batch size when copying rows (default `500`).
-- `--overwrite`: remove the SQLite file if it already exists.
+- Container: `postgres-db`
+- Database: `retail_db`
+- User: `admin`
+- Output folder: `be/cloud-server/data/backups/`
+- Format: plain SQL
 
-After running the export, point your FastAPI app (or any viewer) to `sqlite:///absolute/path/to/demo.sqlite` and the same ORM models will work without a running PostgreSQL instance.
+Specific output file:
+
+```powershell
+python be\cloud-server\scripts\export_postgres.py --output be\cloud-server\data\backups\retail_db_backup.sql --overwrite
+```
+
+Custom PostgreSQL dump format:
+
+```powershell
+python be\cloud-server\scripts\export_postgres.py --format custom --output be\cloud-server\data\backups\retail_db_backup.dump --overwrite
+```
+
+Available flags:
+
+- `--container`: PostgreSQL container name. Default: `postgres-db`.
+- `--database`: database name. Default: `retail_db`.
+- `--user`: PostgreSQL user inside the container. Default: `admin`.
+- `--output`: backup file path.
+- `--format`: `plain` or `custom`.
+- `--clean`: include drop statements before create statements.
+- `--if-exists`: use `IF EXISTS` with `--clean`.
+- `--with-owner`: keep ownership statements.
+- `--with-privileges`: keep grant/revoke statements.
+- `--overwrite`: replace the output file if it already exists.
+
+Restore a plain SQL backup:
+
+```powershell
+Get-Content .\be\cloud-server\data\backups\retail_db_backup.sql | docker exec -i postgres-db psql -U admin -d retail_db
+```
+
+Restore a custom-format backup:
+
+```powershell
+Get-Content .\be\cloud-server\data\backups\retail_db_backup.dump -Raw | docker exec -i postgres-db pg_restore -U admin -d retail_db --clean --if-exists
+```
+
+Do not use `docker compose down -v` before creating a backup unless you intentionally want to delete the PostgreSQL Docker volume.

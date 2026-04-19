@@ -468,7 +468,6 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
             items_count=len(items_data),
             total_amount=round(total_amount, 2),
             recommended_items=[],
-            accepted_recommendations=rand_bool(0.45),
             created_at=transaction_time,
         )
         db.add(tx)
@@ -513,8 +512,6 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
             },
             recommended_products=recommended_payload,
             items_count=len(recommended_payload),
-            accepted=tx.accepted_recommendations,
-            purchased_items=items_data,
             created_at=transaction_time,
         )
         recommendations.append(rec)
@@ -548,15 +545,11 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
                 "total_transactions": 0,
                 "total_revenue": 0.0,
                 "total_recommendations": 0,
-                "recommendations_accepted": 0,
             }
 
         branch_metrics_map[metric_key]["total_transactions"] += 1
         branch_metrics_map[metric_key]["total_revenue"] += total_amount
         branch_metrics_map[metric_key]["total_recommendations"] += 1
-        branch_metrics_map[metric_key]["recommendations_accepted"] += int(
-            tx.accepted_recommendations
-        )
 
         transactions.append(tx)
 
@@ -568,7 +561,6 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
     for (branch_id, metric_date), agg in branch_metrics_map.items():
         total_tx = agg["total_transactions"]
         total_recs = agg["total_recommendations"]
-        accepted = agg["recommendations_accepted"]
 
         metrics_rows.append(
             BranchMetrics(
@@ -580,8 +572,6 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
                     round(agg["total_revenue"] / total_tx, 2) if total_tx else 0
                 ),
                 total_recommendations=total_recs,
-                recommendations_accepted=accepted,
-                acceptance_rate=round(accepted / total_recs, 2) if total_recs else 0,
                 avg_latency_ms=round(random.uniform(60, 220), 2),
                 inference_count=random.randint(50, 500),
                 top_selling_products=random.sample(

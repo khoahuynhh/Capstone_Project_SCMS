@@ -1,210 +1,241 @@
-#FBRS System – Edge AI Retail Platform
+# FBRS System - Edge AI Retail Platform
 
-A full-stack showcase that combines a React/Vite web console with a cloud backend, simulated edge devices, and a monitoring stack. The system streams customer interactions from multiple branches, runs face identification + recommendations at the edge, synchronizes data to a FastAPI cloud service, and exposes real-time metrics over Prometheus/Grafana.
+FBRS is a full-stack retail recommendation system with three deployment surfaces:
+
+- **UI/POS**: React + Vite web application for checkout, face scan, products, transactions, and monitoring.
+- **Cloud Server**: FastAPI service for authentication, products, recommendations, transactions, analytics, PostgreSQL, Redis, MQTT broker, Prometheus, and Grafana.
+- **Edge Device**: lightweight FastAPI runtime for face attribute inference. The edge device returns `age`, `age_group`, `gender`, and `emotion`, then reports device health to the cloud through MQTT.
+
+The production flow is intentionally split:
+
+1. UI captures an image and calls the Edge HTTP API.
+2. Edge runs the AI model and returns face attributes only.
+3. UI calls Cloud HTTP API for product recommendations using those attributes.
+4. UI sends transactions and business operations to Cloud.
+5. Edge sends status and heartbeat events to Cloud through MQTT.
+
+MQTT is used for machine-to-machine edge status and telemetry. It is not used by the UI and it is not the product recommendation path.
 
 ## Repository Layout
 
-- `src/` – React application (camera capture, monitoring, transaction explorer).
-- `.env` – Frontend configuration (`VITE_SERVER_API_BASE`, `VITE_EDGE_API_BASE`).
-- `be/` – Backend mono-folder that contains everything needed to run the services:
-  - `docker-compose.yml` – Cloud API, two edge-device simulators, Mosquitto, PostgreSQL, Redis, Prometheus, Grafana.
-  - `cloud-server/` – FastAPI app (`uvicorn main:app`) with PostgreSQL + Redis.
-  - `edge-device/` – Python edge runtime (camera/face identification simulation + branch level metrics).
-  - `monitoring/` – Prometheus scrape config and Grafana provisioning.
-  - `mqtt-broker/`, `data/` – Local volumes persisted on the host.
+```text
+.
+|-- src/                         React/Vite UI
+|-- public/                      Static frontend assets
+|-- be/
+|   |-- cloud-server/            FastAPI cloud application
+|   |-- edge-device/             FastAPI edge inference runtime
+|   |-- docker-compose.cloud.yml Cloud stack for server deployment
+|   |-- docker-compose.edge.yml  Edge stack for Raspberry Pi or local edge testing
+|   |-- docker-compose.yml       Legacy all-in-one local demo
+|   |-- init-db/                 PostgreSQL initialization scripts
+|   |-- monitoring/              Prometheus and Grafana provisioning
+|   `-- mqtt-broker/             Mosquitto configuration
+|-- .env.example                 Frontend environment template
+`-- package.json                 Frontend scripts and dependencies
+```
 
-> The quickest way to spin up every component (cloud + edges + monitoring + UI) is to run Docker Compose inside `be/` and then start the frontend dev server from repo root.
-
----
+Use `be/docker-compose.cloud.yml` and `be/docker-compose.edge.yml` for the current deployment model. Keep `be/docker-compose.yml` only for older all-in-one local demos.
 
 ## Prerequisites
 
 - Node.js 18+ and npm.
-- Docker Desktop (Compose v2) with enough memory for 8 services.
-- Python 3.11+ only if you plan to run `cloud-server` or `edge-device` outside Docker.
-- Webcam permission (Chrome/Edge/Safari) if you want to use the face-recognition widget from the UI.
+- Docker Desktop or Docker Engine with Compose v2.
+- Python 3.11+ only when running services outside Docker.
+- A trained edge model at `be/edge-device/models/best_model.pth`.
+- Network access from the UI/POS machine to both Cloud API and Edge API.
 
----
+## Environment Files
 
-## Quick Start (All-in-one stack)
+Copy the templates before running the system:
 
-1. **Clone & install dependencies**
-   ```bash
-   git clone <repo-url> && cd smcs-system
-   npm install
-   ```
-2. **Configure environment variables**
-   - Frontend: `cp .env.example .env` and edit values (sample below).
-   - Backend: `cd be && cp .env.example .env`. If you want to customize edge settings, also copy `edge-device/.env.example` to `edge-device/.env`.
-3. **Start every backend service**
+```powershell
+Copy-Item .env.example .env
+Copy-Item be\.env.example be\.env
+Copy-Item be\edge-device\.env.docker.example be\edge-device\.env
+```
 
-   ```bash
-   cd be
-   ./start.sh             # optional helper; runs the steps below
-   docker compose up -d   # build + start: cloud-server, edge devices, db, mqtt, monitoring
-   docker compose ps      # verify all 8 services are "running"
-   ```
+Frontend `.env`:
 
-   for dev: docker compose up mosquitto postgres redis
+```env
+VITE_SERVER_API_BASE=http://localhost:8000
+VITE_EDGE_API_BASE=http://localhost:8001
+VITE_BRANCH_ID=HCM_Q1
+VITE_DEVICE_ID=EDGE_HCM_Q1_01
+VITE_GRAFANA_EMBED_URL=http://localhost:3000/d/edge-ai-retail-overview/edge-ai-retail-system-overview?orgId=1&kiosk
+```
 
-4. **Launch the frontend**
-   ```bash
-   cd ..                  # back to repo root
-   npm run dev -- --host
-   ```
-5. **Open the interfaces**
-   - Web console: http://localhost:5173 (or whichever host Vite prints).
-   - Cloud API: http://localhost:8000
-   - API Docs (Swagger): http://localhost:8000/docs
-   - Edge devices: http://localhost:8001 (branch 1), http://localhost:8002 (branch 2)
-   - Grafana: http://localhost:3000 (admin / admin)
-   - Prometheus: http://localhost:9090
-   - Mosquitto broker: `localhost:1883`
-   - PostgreSQL: `postgresql://admin:admin123@localhost:5432/retail_db`
+Cloud `.env` lives at `be/.env` and configures PostgreSQL, Redis, MQTT, JWT, admin API key, and monitoring ports.
 
-Stop everything with:
+Edge `.env` lives at `be/edge-device/.env` and configures device identity, model path, HTTP port, MQTT broker, and heartbeat interval.
 
-```bash
+## Local Development
+
+Start the Cloud stack:
+
+```powershell
 cd be
-docker compose down
+docker compose -f docker-compose.cloud.yml up -d --build
 ```
 
-Add `-v` if you also want to delete volumes/data.
+Start the Edge stack:
 
----
-
-## Environment Configuration
-
-### Frontend `.env`
-
-```ini
-VITE_SERVER_API_BASE=http://localhost:8000    # FastAPI cloud server
-VITE_EDGE_API_BASE=http://localhost:8001      # Edge device HTTP API the UI should talk to
+```powershell
+cd be
+docker compose -f docker-compose.edge.yml up -d --build
 ```
 
-Set `VITE_EDGE_API_BASE` to `http://localhost:8002` if you want to observe the second branch instead.
+Start the UI from the repository root:
 
-### Cloud server `.env` (inside `be/`)
-
-Key options from `be/.env.example`:
-
-```ini
-DATABASE_URL=postgresql://admin:admin123@postgres:5432/retail_db
-REDIS_URL=redis://redis:6379
-MQTT_BROKER=mosquitto
-DATA_RETENTION_DAYS=90
-FL_AGGREGATION_METHOD=fedavg
-JWT_SECRET_KEY=change-me
+```powershell
+npm install
+npm run dev -- --host
 ```
 
-Most defaults already match the Docker Compose network aliases. Override when deploying to another environment.
+Open:
 
-### Edge device `.env`
+- UI: `http://localhost:5173`
+- Cloud API: `http://localhost:8000`
+- Cloud Swagger: `http://localhost:8000/docs`
+- Edge API: `http://localhost:8001`
+- Grafana: `http://localhost:3000`
+- Prometheus: `http://localhost:9090`
+- MQTT broker: `localhost:1883`
+- PostgreSQL host port: `localhost:5433`
 
-```ini
-BRANCH_ID=branch_001
-BRANCH_NAME="Chi nhánh Quận 1"
-DEVICE_ID=edge_001
-CLOUD_API=http://cloud-server:8000
-MQTT_BROKER=mosquitto:1883
-CAMERA_MOCK=true        # disable when using a real webcam
-INFERENCE_DEVICE=cpu    # cpu, cuda, tensorrt
-```
-
-Each edge container (or physical device) needs its own identity and cloud credentials. Branch 2 is configured via Compose env overrides.
-
----
-
-## Backend Stack Breakdown
-
-| Service         | Purpose & Port                                                    | How to check                                          |
-| --------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| `cloud-server`  | FastAPI app on `:8000` for transactions, consent, model mgmt      | `curl http://localhost:8000/health`                   |
-| `edge-device-1` | Branch 1 simulator exposing `:8001` (`/face/identify`, `/health`) | `curl http://localhost:8001/health`                   |
-| `edge-device-2` | Branch 2 simulator at host `:8002`                                | `curl http://localhost:8002/health`                   |
-| `mosquitto`     | MQTT broker `1883/9001` for telemetry                             | `docker logs mqtt-broker`                             |
-| `postgres`      | Transaction storage                                               | `docker exec postgres-db psql -U admin -c "SELECT 1"` |
-| `redis`         | Cache/event buffer                                                | `docker exec redis-cache redis-cli ping`              |
-| `prometheus`    | Metrics scrape `:9090`                                            | `curl http://localhost:9090/-/healthy`                |
-| `grafana`       | Dashboards `:3000`                                                | Login `admin/admin`                                   |
-
-Docker volumes `be/data`, `mqtt-data`, `postgres-data`, etc. keep state between runs.
-
----
-
-## Frontend Development Workflow
-
-1. Install deps at repo root: `npm install`.
-2. Start Vite dev server: `npm run dev -- --host`.
-3. Camera widget:
-   - Browsers require HTTPS or `localhost` to grant camera permission.
-   - When no webcam is available, enable the mock mode on the edge device (`CAMERA_MOCK=true`) so it replays stored frames.
-4. API client modules live in `src/core/api`. They read the `VITE_*` URLs once on boot, so restart Vite after editing `.env`.
-5. Production build: `npm run build` (outputs to `dist/`). Preview locally with `npm run preview`.
-
----
-
-## Running Services Outside Docker (optional)
+## Production Deployment Shape
 
 ### Cloud server
 
-```bash
-cd be/cloud-server
-python -m venv .venv && source .venv/Scripts/activate   # or bin/activate on mac/linux
-pip install -r requirements.txt
-cp ../.env.example .env && edit values
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+Run on the server that owns PostgreSQL, Redis, MQTT, Cloud API, Prometheus, and Grafana:
+
+```powershell
+cd be
+docker compose -f docker-compose.cloud.yml up -d --build
 ```
 
-### Edge device
+Use strong production values in `be/.env`:
 
-```bash
-cd be/edge-device
-python -m venv .venv && source .venv/Scripts/activate
-pip install -r requirements.txt
-cp .env.example .env
-python main.py
+```env
+POSTGRES_PASSWORD=<strong-password>
+JWT_SECRET=<long-random-secret>
+JWT_SECRET_KEY=<long-random-secret>
+ADMIN_API_KEY=<admin-api-key>
+GRAFANA_ADMIN_PASSWORD=<grafana-password>
+API_KEY_ENABLED=true
 ```
 
-Point `CLOUD_API`, `REDIS_URL`, and `MQTT_BROKER` to the services you want the device to talk to. Real hardware can be swapped in by turning `CAMERA_MOCK` off and configuring `CAMERA_INDEX`.
+### Edge device / Raspberry Pi
 
----
+Run on the Raspberry Pi or edge computer:
 
-## Monitoring & Verification
+```powershell
+cd be
+docker compose -f docker-compose.edge.yml up -d --build
+```
 
-- **Grafana** dashboards are pre-provisioned in `be/monitoring/grafana`. Branch KPIs, model performance, and federated learning progress are available after a few minutes of data.
-- **Prometheus** scrapes the cloud + edges. Custom metrics (e.g., `edge_inference_latency_seconds`, `edge_recommendations_total`) are visible at http://localhost:9090/graph.
-- **Health scripts**
-  - `be/full_verification.sh` – Runs end-to-end checks (Docker services, cloud health, MQTT, DB, edge telemetry, Prometheus, Grafana). Re-run after the stack is up to confirm readiness.
-  - `be/verify_api.sh` – Quick smoke test for health, transactions, branches, and metrics summary.
+In `be/edge-device/.env`, set:
 
----
+```env
+BRANCH_ID=HCM_Q1
+BRANCH_NAME=Mart Quan 1
+DEVICE_ID=EDGE_HCM_Q1_01
+MQTT_BROKER=<cloud-server-ip-or-dns>
+MQTT_PORT=1883
+MODEL_STORAGE_PATH=./models
+INFERENCE_DEVICE=cpu
+```
 
-## Useful Commands
+Do not use `localhost` for `MQTT_BROKER` on a real Raspberry Pi unless the MQTT broker is also running on that same Pi.
 
-- Tail logs for one service: `cd be && docker compose logs -f cloud-server`.
-- Rebuild everything after backend changes: `docker compose up -d --build`.
-- Reset persistent data (dangerous): `docker compose down -v && rm -rf data postgres-data mqtt-data`.
-- List active containers: `docker compose ps`.
-- Inspect metrics from an edge device: `curl http://localhost:8001/metrics`.
+### UI/POS
 
----
+Build the UI:
 
-## Troubleshooting
+```powershell
+npm run build
+```
 
-- **Port already in use** – Stop any process using 5173/8000/8001/5432/etc., or change the exposed ports in `be/docker-compose.yml`.
-- **Cloud server unhealthy** – Check `.env` (DB/MQTT URLs), then run `docker compose logs -f cloud-server`.
-- **Edge device not producing data** – Ensure MQTT and Redis are reachable, give it ~30 seconds, and watch logs with `docker compose logs -f edge-device-1`.
-- **Frontend cannot reach APIs** – Confirm `.env` URLs match the ports exposed on your machine and that Vite was restarted after changes.
-- **Camera not accessible** – Use Chrome/Edge on `https://localhost` or allow camera permissions. For headless demos, enable `CAMERA_MOCK=true` on the edge devices.
-- **Grafana login fails** – The default credentials are `admin/admin`. If overridden, inspect `GF_SECURITY_ADMIN_PASSWORD` in Compose.
+For deployment, configure the UI environment so it can reach:
 
----
+- Cloud API through `VITE_SERVER_API_BASE`.
+- Local or LAN Edge API through `VITE_EDGE_API_BASE`.
 
-## Next Steps
+## Main Runtime APIs
 
-- Customize the data and model files stored under `be/data/` & `be/edge-device/models/`.
-- Extend the React UI (pages live in `src/pages`) to surface more APIs (consent, FL rounds, etc.).
-- Wire CI to run `npm run build` and `docker compose build` to ensure future changes keep the stack healthy.
+Cloud:
 
-Enjoy hacking on SMCS!
+- `GET /health`
+- `GET /products`
+- `POST /recommendations/by-attributes`
+- `POST /transactions`
+- `GET /transactions`
+- `GET /metrics/summary`
+- `GET /metrics`
+
+Edge:
+
+- `GET /health`
+- `GET /metrics`
+- `POST /face/analysis`
+
+Expected edge response shape:
+
+```json
+{
+  "success": true,
+  "branch_id": "HCM_Q1",
+  "device_id": "EDGE_HCM_Q1_01",
+  "age": 28,
+  "age_group": "25_34",
+  "gender": "female",
+  "emotion": "happy",
+  "source": "edge_face_attribute_model",
+  "latency_ms": 120.5
+}
+```
+
+## Data Backup And Restore
+
+Back up the current PostgreSQL data:
+
+```powershell
+python be\cloud-server\scripts\export_postgres.py
+```
+
+Restore a plain SQL backup into a new PostgreSQL container:
+
+```powershell
+Get-Content .\be\cloud-server\data\backups\<backup-file>.sql | docker exec -i postgres-db psql -U admin -d retail_db
+```
+
+Never run `docker compose down -v` unless you intentionally want to remove volumes. PostgreSQL data lives in the Docker volume used by the `postgres` service.
+
+## Verification
+
+Check Cloud:
+
+```powershell
+curl http://localhost:8000/health
+docker compose -f be/docker-compose.cloud.yml ps
+```
+
+Check Edge:
+
+```powershell
+curl http://localhost:8001/health
+docker compose -f be/docker-compose.edge.yml logs -f edge-device
+```
+
+Check MQTT heartbeat from a machine that has Mosquitto clients installed:
+
+```powershell
+mosquitto_sub -h localhost -p 1883 -t "retail/#"
+```
+
+## Notes
+
+- `be/edge-device/main.py` is legacy simulation code and is not the current production entrypoint.
+- The current edge production entrypoint is `uvicorn edge_api:app --host 0.0.0.0 --port 8001`.
+- Redis is part of the Cloud stack. It is not required on the Edge device.
+- Product recommendation rendering belongs to the UI, using recommendation data returned by the Cloud API.

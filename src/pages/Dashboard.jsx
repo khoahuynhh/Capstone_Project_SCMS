@@ -76,6 +76,12 @@ const buildSnapshot = ({ overview }) => ({
 
 const formatPeriodLabel = (days) => `${days} ngày`;
 const ASSOCIATION_JOB_STORAGE_KEY = 'dashboard.associationJobId';
+const RECOMMENDATION_ALGORITHM_LABELS = {
+  purchase_history_sort: 'Lich su mua',
+  attribute_ai: 'AI khuon mat',
+  association_rules: 'Luat ket hop',
+  unknown: 'Khong xac dinh',
+};
 
 const getAssociationJobStatusLabel = (status) => {
   const labels = {
@@ -84,6 +90,15 @@ const getAssociationJobStatusLabel = (status) => {
     running: 'Đang chạy',
     success: 'Hoàn tất',
     failed: 'Thất bại',
+  };
+  return labels[status] || status || '--';
+};
+
+const getInventoryStatusLabel = (status) => {
+  const labels = {
+    out_of_stock: 'Hết hàng',
+    low_stock: 'Sắp hết',
+    in_stock: 'Còn hàng',
   };
   return labels[status] || status || '--';
 };
@@ -161,6 +176,7 @@ const fetchDashboardPayload = async ({ days, branchId }) => {
     topProductsResponse,
     branchPerformanceResponse,
     inventoryAlertsResponse,
+    branchInventoryResponse,
     customerSegmentsResponse,
   ] = await Promise.all([
     serverApi.health().catch(() => null),
@@ -173,6 +189,7 @@ const fetchDashboardPayload = async ({ days, branchId }) => {
     serverApi.analyticsTopProducts({ days, branchId, limit: 10 }).catch(() => null),
     serverApi.analyticsBranchPerformance({ days }).catch(() => null),
     serverApi.analyticsInventoryAlerts({ branchId, threshold: 5 }).catch(() => null),
+    serverApi.analyticsBranchInventory({ branchId, threshold: 5, limit: 12 }).catch(() => null),
     serverApi.analyticsCustomerSegments({ branchId }).catch(() => null),
   ]);
 
@@ -195,6 +212,7 @@ const fetchDashboardPayload = async ({ days, branchId }) => {
     topProductsResponse,
     branchPerformanceResponse,
     inventoryAlertsResponse,
+    branchInventoryResponse,
     customerSegmentsResponse,
     lastUpdatedAt: new Date().toISOString(),
   };
@@ -218,6 +236,7 @@ const DashboardPage = () => {
     topProductsResponse: null,
     branchPerformanceResponse: null,
     inventoryAlertsResponse: null,
+    branchInventoryResponse: null,
     customerSegmentsResponse: null,
     lastUpdatedAt: '',
   });
@@ -334,6 +353,7 @@ const DashboardPage = () => {
     const topProducts = dashboardState.topProductsResponse?.items;
     const branchPerformance = dashboardState.branchPerformanceResponse?.items;
     const inventoryAlerts = dashboardState.inventoryAlertsResponse?.items;
+    const branchInventory = dashboardState.branchInventoryResponse;
     const customerSegments = dashboardState.customerSegmentsResponse?.items;
     const filteredBranchPerformance = Array.isArray(branchPerformance)
       ? branchPerformance.filter((branch) => !selectedBranchId || branch.branch_id === selectedBranchId)
@@ -358,6 +378,7 @@ const DashboardPage = () => {
         overview?.recommendation_summary?.total_recommendations
         ?? recommendation?.total_recommendations
         ?? 0,
+      recommendationAlgorithmPerformance: overview?.recommendation_algorithm_performance ?? [],
       avgItemsRecommended: recommendation?.avg_items_recommended ?? 0,
       modelVersion: model?.version ?? 'N/A',
       modelAccuracy: model?.accuracy ?? 0,
@@ -371,6 +392,20 @@ const DashboardPage = () => {
       inventoryAlerts: Array.isArray(inventoryAlerts) && inventoryAlerts.length
         ? inventoryAlerts
         : (overview?.inventory_alerts ?? []),
+      branchInventoryTotals: branchInventory?.totals ?? {
+        sku_count: 0,
+        total_stock: 0,
+        total_reserved: 0,
+        total_available: 0,
+        low_stock_items: 0,
+        out_of_stock_items: 0,
+      },
+      branchInventoryBranches: Array.isArray(branchInventory?.branches)
+        ? branchInventory.branches
+        : [],
+      branchInventoryItems: Array.isArray(branchInventory?.items)
+        ? branchInventory.items
+        : [],
       customerSegments: Array.isArray(customerSegments) && customerSegments.length
         ? customerSegments
         : (overview?.customer_segments ?? []),
@@ -385,6 +420,7 @@ const DashboardPage = () => {
   }, [dashboardState, selectedBranchId]);
 
   const topBranch = derived.branchPerformance?.[0] ?? null;
+  const inventoryScopeLabel = selectedBranchId || 'Toàn chuỗi';
 
   const systemSummary = useMemo(
     () =>
@@ -615,6 +651,135 @@ const DashboardPage = () => {
                 hint={`${formatNumber(derived.totalRecommendations)} lượt gợi ý`}
                 tone="rose"
               />
+            </section>
+
+            <section className="panel-card inventory-command-card">
+              <div className="panel-card__header">
+                <div>
+                  <span className="eyebrow">Branch inventory</span>
+                  <h2>Tồn kho theo chi nhánh</h2>
+                </div>
+                <StatusPill
+                  ok={Number(derived.branchInventoryTotals.out_of_stock_items || 0) === 0}
+                  neutral={
+                    Number(derived.branchInventoryTotals.out_of_stock_items || 0) === 0
+                    && Number(derived.branchInventoryTotals.low_stock_items || 0) > 0
+                  }
+                  label={inventoryScopeLabel}
+                />
+              </div>
+
+              <div className="inventory-summary-strip">
+                <div className="inventory-summary-item">
+                  <span>SKU đang theo dõi</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.sku_count)}</strong>
+                </div>
+                <div className="inventory-summary-item">
+                  <span>Tổng tồn</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.total_stock)}</strong>
+                </div>
+                <div className="inventory-summary-item">
+                  <span>Khả dụng</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.total_available)}</strong>
+                </div>
+                <div className="inventory-summary-item">
+                  <span>Đang giữ</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.total_reserved)}</strong>
+                </div>
+                <div className="inventory-summary-item is-warning">
+                  <span>Sắp hết</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.low_stock_items)}</strong>
+                </div>
+                <div className="inventory-summary-item is-danger">
+                  <span>Hết hàng</span>
+                  <strong>{formatNumber(derived.branchInventoryTotals.out_of_stock_items)}</strong>
+                </div>
+              </div>
+
+              <div className="inventory-layout">
+                <div className="inventory-branch-list">
+                  {derived.branchInventoryBranches.length ? derived.branchInventoryBranches.map((branch) => (
+                    <div key={branch.branch_id} className="inventory-branch-row">
+                      <div>
+                        <strong>{branch.branch_name || branch.branch_id}</strong>
+                        <span>{formatNumber(branch.sku_count)} SKU • khả dụng {formatNumber(branch.total_available)}</span>
+                      </div>
+                      <div>
+                        <span>{formatNumber(branch.low_stock_items)} sắp hết</span>
+                        <strong>{formatNumber(branch.out_of_stock_items)} hết hàng</strong>
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="empty-state">Chưa có dữ liệu tồn kho theo chi nhánh.</div>
+                  )}
+                </div>
+
+                <div className="inventory-table">
+                  <div className="inventory-table__head">
+                    <span>Sản phẩm</span>
+                    <span>Chi nhánh</span>
+                    <span>Tồn</span>
+                    <span>Giữ</span>
+                    <span>Khả dụng</span>
+                    <span>Trạng thái</span>
+                  </div>
+
+                  {derived.branchInventoryItems.length ? derived.branchInventoryItems.map((item) => (
+                    <div key={`${item.branch_id}-${item.product_id}`} className="inventory-table__row">
+                      <span>
+                        <strong>{item.product_name}</strong>
+                        <small>{item.category || 'Chưa phân loại'}</small>
+                      </span>
+                      <span>{item.branch_name || item.branch_id}</span>
+                      <span>{formatNumber(item.stock)}</span>
+                      <span>{formatNumber(item.reserved)}</span>
+                      <span>{formatNumber(item.available)}</span>
+                      <span>
+                        <span className={`inventory-status is-${item.status}`}>
+                          {getInventoryStatusLabel(item.status)}
+                        </span>
+                      </span>
+                    </div>
+                  )) : (
+                    <div className="empty-state">Không có sản phẩm tồn kho cần ưu tiên hiển thị.</div>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel-card recommendation-algorithm-card">
+              <div className="panel-card__header">
+                <div>
+                  <span className="eyebrow">Recommendation performance</span>
+                  <h2>Hieu qua theo tung thuat toan goi y</h2>
+                </div>
+              </div>
+
+              <div className="recommendation-table">
+                <div className="recommendation-table__head">
+                  <span>Thuat toan</span>
+                  <span>Impressions</span>
+                  <span>Clicks</span>
+                  <span>Accepts</span>
+                  <span>CTR</span>
+                  <span>Acceptance</span>
+                </div>
+
+                {derived.recommendationAlgorithmPerformance.length ? (
+                  derived.recommendationAlgorithmPerformance.map((item) => (
+                    <div key={item.algorithm} className="recommendation-table__row">
+                      <span>{RECOMMENDATION_ALGORITHM_LABELS[item.algorithm] || item.algorithm}</span>
+                      <span>{formatNumber(item.impressions)}</span>
+                      <span>{formatNumber(item.clicks)}</span>
+                      <span>{formatNumber(item.accepted)}</span>
+                      <span>{formatPercent(item.ctr)}</span>
+                      <span>{formatPercent(item.acceptance_rate)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty-state">Chua co du lieu tu recommendation events.</div>
+                )}
+              </div>
             </section>
 
             <section className="dashboard-grid dashboard-grid--top">

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, date
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Date, Integer, case, desc
+from sqlalchemy import func, cast, Date, case, desc
 from fastapi.concurrency import run_in_threadpool
 
 from database.db import SessionLocal
@@ -15,6 +15,7 @@ from database.models import (
     Transaction,
     TransactionItem,
     Recommendation,
+    RecommendationEvent,
     Customer,
     CustomerStats,
     BranchInventory,
@@ -126,9 +127,42 @@ class InventoryAlertItem(BaseModel):
     status: str
 
 
+class BranchInventorySummaryItem(BaseModel):
+    branch_id: str
+    branch_name: Optional[str] = None
+    sku_count: int
+    total_stock: int
+    total_reserved: int
+    total_available: int
+    low_stock_items: int
+    out_of_stock_items: int
+
+
+class BranchInventoryProductItem(BaseModel):
+    branch_id: str
+    branch_name: Optional[str] = None
+    product_id: int
+    product_name: str
+    category: Optional[str] = None
+    stock: int
+    reserved: int
+    available: int
+    status: str
+    updated_at: Optional[str] = None
+
+
 class RecommendationSummary(BaseModel):
     total_recommendations: int
     total_accepted: int
+    acceptance_rate: float
+
+
+class RecommendationAlgorithmPerformanceItem(BaseModel):
+    algorithm: str
+    impressions: int
+    clicks: int
+    accepted: int
+    ctr: float
     acceptance_rate: float
 
 
@@ -151,6 +185,7 @@ class DashboardOverviewResponse(BaseModel):
     customer_segments: List[CustomerSegmentItem]
     inventory_alerts: List[InventoryAlertItem]
     recommendation_summary: RecommendationSummary
+    recommendation_algorithm_performance: List[RecommendationAlgorithmPerformanceItem]
     device_status: DeviceStatusSummary
 
 
@@ -237,7 +272,6 @@ def _get_dashboard_data(
     current_rec_stats = (
         db.query(
             func.count(Recommendation.id),
-            func.coalesce(func.sum(cast(Recommendation.accepted, Integer)), 0),
         )
         .filter(*current_rec_filter)
         .one()
@@ -246,28 +280,139 @@ def _get_dashboard_data(
     prev_rec_stats = (
         db.query(
             func.count(Recommendation.id),
-            func.coalesce(func.sum(cast(Recommendation.accepted, Integer)), 0),
         )
         .filter(*prev_rec_filter)
         .one()
     )
 
     current_total_recs = int(current_rec_stats[0] or 0)
-    current_total_accepted = int(current_rec_stats[1] or 0)
-    current_acceptance_rate = round(
-        safe_div(current_total_accepted, current_total_recs) * 100, 2
-    )
-
     prev_total_recs = int(prev_rec_stats[0] or 0)
-    prev_total_accepted = int(prev_rec_stats[1] or 0)
-    prev_acceptance_rate = round(
-        safe_div(prev_total_accepted, prev_total_recs) * 100, 2
+
+    current_event_filter = [RecommendationEvent.timestamp >= start_date]
+    prev_event_filter = [
+        RecommendationEvent.timestamp >= prev_start_date,
+        RecommendationEvent.timestamp < start_date,
+    ]
+    if branch_id:
+        current_event_filter.append(RecommendationEvent.branch_id == branch_id)
+        prev_event_filter.append(RecommendationEvent.branch_id == branch_id)
+
+    current_event_stats = (
+        db.query(
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "impression", 1), else_=0)
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case((RecommendationEvent.event_type == "click", 1), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "add_to_cart", 1), else_=0)
+                ),
+                0,
+            ),
+        )
+        .filter(*current_event_filter)
+        .one()
+    )
+    prev_event_stats = (
+        db.query(
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "impression", 1), else_=0)
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case((RecommendationEvent.event_type == "click", 1), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "add_to_cart", 1), else_=0)
+                ),
+                0,
+            ),
+        )
+        .filter(*prev_event_filter)
+        .one()
     )
 
-    # CTR business proxy:
-    # accepted recommendation / total recommendation
-    current_ctr = current_acceptance_rate
-    prev_ctr = prev_acceptance_rate
+    current_impressions = int(current_event_stats[0] or 0)
+    current_clicks = int(current_event_stats[1] or 0)
+    current_total_accepted = int(current_event_stats[2] or 0)
+    prev_impressions = int(prev_event_stats[0] or 0)
+    prev_clicks = int(prev_event_stats[1] or 0)
+    prev_total_accepted = int(prev_event_stats[2] or 0)
+
+    current_ctr = round(safe_div(current_clicks, current_impressions) * 100, 2)
+    prev_ctr = round(safe_div(prev_clicks, prev_impressions) * 100, 2)
+    current_acceptance_rate = round(
+        safe_div(current_total_accepted, current_impressions) * 100, 2
+    )
+    prev_acceptance_rate = round(
+        safe_div(prev_total_accepted, prev_impressions) * 100, 2
+    )
+
+    algorithm_key = case(
+        (RecommendationEvent.algorithm == "client_ai_sort", "attribute_ai"),
+        else_=func.coalesce(RecommendationEvent.algorithm, "unknown"),
+    ).label("algorithm")
+    algorithm_rows = (
+        db.query(
+            algorithm_key,
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "impression", 1), else_=0)
+                ),
+                0,
+            ).label("impressions"),
+            func.coalesce(
+                func.sum(case((RecommendationEvent.event_type == "click", 1), else_=0)),
+                0,
+            ).label("clicks"),
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "add_to_cart", 1), else_=0)
+                ),
+                0,
+            ).label("accepted"),
+        )
+        .filter(*current_event_filter)
+        .group_by(algorithm_key)
+        .all()
+    )
+
+    algorithm_metrics = {
+        "purchase_history_sort": {"impressions": 0, "clicks": 0, "accepted": 0},
+        "attribute_ai": {"impressions": 0, "clicks": 0, "accepted": 0},
+        "association_rules": {"impressions": 0, "clicks": 0, "accepted": 0},
+    }
+    for row in algorithm_rows:
+        key = row.algorithm or "unknown"
+        if key not in algorithm_metrics:
+            algorithm_metrics[key] = {"impressions": 0, "clicks": 0, "accepted": 0}
+        algorithm_metrics[key]["impressions"] += int(row.impressions or 0)
+        algorithm_metrics[key]["clicks"] += int(row.clicks or 0)
+        algorithm_metrics[key]["accepted"] += int(row.accepted or 0)
+
+    recommendation_algorithm_performance = [
+        RecommendationAlgorithmPerformanceItem(
+            algorithm=algorithm,
+            impressions=values["impressions"],
+            clicks=values["clicks"],
+            accepted=values["accepted"],
+            ctr=round(safe_div(values["clicks"], values["impressions"]) * 100, 2),
+            acceptance_rate=round(
+                safe_div(values["accepted"], values["impressions"]) * 100, 2
+            ),
+        )
+        for algorithm, values in algorithm_metrics.items()
+    ]
 
     # -------------------------
     # Foot traffic & conversion
@@ -584,6 +729,7 @@ def _get_dashboard_data(
             total_accepted=current_total_accepted,
             acceptance_rate=current_acceptance_rate,
         ),
+        recommendation_algorithm_performance=recommendation_algorithm_performance,
         device_status=device_status,
     )
 
@@ -819,6 +965,119 @@ async def get_inventory_alerts(
                 "status": row.status,
             }
             for row in rows
+        ],
+    }
+
+
+@router.get("/dashboard/branch-inventory")
+async def get_branch_inventory(
+    branch_id: Optional[str] = Query(None),
+    threshold: int = Query(5, ge=0, le=100),
+    limit: int = Query(15, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    available_expr = BranchInventory.stock - BranchInventory.reserved
+
+    summary_query = (
+        db.query(
+            BranchInventory.branch_id,
+            Store.name.label("branch_name"),
+            func.count(BranchInventory.product_id).label("sku_count"),
+            func.coalesce(func.sum(BranchInventory.stock), 0).label("total_stock"),
+            func.coalesce(func.sum(BranchInventory.reserved), 0).label("total_reserved"),
+            func.coalesce(func.sum(available_expr), 0).label("total_available"),
+            func.coalesce(
+                func.sum(case((available_expr <= threshold, 1), else_=0)),
+                0,
+            ).label("low_stock_items"),
+            func.coalesce(
+                func.sum(case((available_expr <= 0, 1), else_=0)),
+                0,
+            ).label("out_of_stock_items"),
+        )
+        .join(Store, Store.id == BranchInventory.branch_id)
+        .group_by(BranchInventory.branch_id, Store.name)
+        .order_by(BranchInventory.branch_id)
+    )
+
+    items_query = (
+        db.query(
+            BranchInventory.branch_id,
+            Store.name.label("branch_name"),
+            BranchInventory.product_id,
+            Product.name.label("product_name"),
+            Product.category,
+            BranchInventory.stock,
+            BranchInventory.reserved,
+            available_expr.label("available"),
+            case(
+                (available_expr <= 0, "out_of_stock"),
+                (available_expr <= threshold, "low_stock"),
+                else_="in_stock",
+            ).label("status"),
+            BranchInventory.updated_at,
+        )
+        .join(Store, Store.id == BranchInventory.branch_id)
+        .join(Product, Product.id == BranchInventory.product_id)
+    )
+
+    if branch_id:
+        summary_query = summary_query.filter(BranchInventory.branch_id == branch_id)
+        items_query = items_query.filter(BranchInventory.branch_id == branch_id)
+
+    summary_rows = summary_query.all()
+    item_rows = (
+        items_query.order_by(
+            "available",
+            BranchInventory.branch_id,
+            BranchInventory.stock,
+            Product.name,
+        )
+        .limit(limit)
+        .all()
+    )
+
+    totals = {
+        "sku_count": sum(int(row.sku_count or 0) for row in summary_rows),
+        "total_stock": sum(int(row.total_stock or 0) for row in summary_rows),
+        "total_reserved": sum(int(row.total_reserved or 0) for row in summary_rows),
+        "total_available": sum(int(row.total_available or 0) for row in summary_rows),
+        "low_stock_items": sum(int(row.low_stock_items or 0) for row in summary_rows),
+        "out_of_stock_items": sum(int(row.out_of_stock_items or 0) for row in summary_rows),
+    }
+
+    return {
+        "branch_id": branch_id,
+        "threshold": threshold,
+        "limit": limit,
+        "totals": totals,
+        "branches": [
+            BranchInventorySummaryItem(
+                branch_id=row.branch_id,
+                branch_name=row.branch_name,
+                sku_count=int(row.sku_count or 0),
+                total_stock=int(row.total_stock or 0),
+                total_reserved=int(row.total_reserved or 0),
+                total_available=int(row.total_available or 0),
+                low_stock_items=int(row.low_stock_items or 0),
+                out_of_stock_items=int(row.out_of_stock_items or 0),
+            ).model_dump()
+            for row in summary_rows
+        ],
+        "items": [
+            BranchInventoryProductItem(
+                branch_id=row.branch_id,
+                branch_name=row.branch_name,
+                product_id=row.product_id,
+                product_name=row.product_name,
+                category=row.category,
+                stock=int(row.stock or 0),
+                reserved=int(row.reserved or 0),
+                available=int(row.available or 0),
+                status=row.status,
+                updated_at=row.updated_at.isoformat() if row.updated_at else None,
+            ).model_dump()
+            for row in item_rows
         ],
     }
 

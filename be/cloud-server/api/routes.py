@@ -10,17 +10,18 @@ from fastapi import (
     UploadFile,
     File,
 )
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Literal
 from datetime import datetime, timedelta
 from pydantic import BaseModel, EmailStr, field_validator
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, desc
+from sqlalchemy import or_, desc, func, case
 from database.db import get_db
 from database.models import (
     Transaction,
     TransactionItem,
     Recommendation,
+    RecommendationEvent,
     Product,
     UserAccount,
     Customer,
@@ -123,6 +124,25 @@ class AttributeRecommendationBody(BaseModel):
     emotion: Optional[str] = None
     branch_id: Optional[str] = None
     top_k: int = 20
+
+
+class RecommendationEventCreate(BaseModel):
+    event_type: Literal["impression", "click", "add_to_cart"]
+    product_id: int
+    customer_id: Optional[int] = None
+    branch_id: Optional[str] = None
+    device_id: Optional[str] = None
+    surface: str
+    algorithm: Optional[str] = None
+    position: Optional[int] = None
+    session_id: Optional[str] = None
+    recommendation_id: Optional[int] = None
+    event_metadata: Optional[Dict] = None
+    timestamp: Optional[datetime] = None
+
+
+class RecommendationEventBulkCreate(BaseModel):
+    events: List[RecommendationEventCreate]
 
 
 class UpdateProfileBody(BaseModel):
@@ -764,6 +784,59 @@ def list_branches(db: Session = Depends(get_db)):
 # =========================
 # Recommendations API
 # =========================
+@router.post("/recommendation-events", status_code=status.HTTP_201_CREATED)
+def create_recommendation_events(
+    body: RecommendationEventBulkCreate,
+    db: Session = Depends(get_db),
+):
+    """Record recommendation impressions, clicks, and add-to-cart events."""
+    if not body.events:
+        raise HTTPException(status_code=400, detail="events must not be empty")
+
+    if len(body.events) > 200:
+        raise HTTPException(status_code=400, detail="events must contain at most 200 items")
+
+    product_ids = {event.product_id for event in body.events}
+    existing_product_ids = {
+        row[0]
+        for row in db.query(Product.id).filter(Product.id.in_(product_ids)).all()
+    }
+    missing_product_ids = sorted(product_ids - existing_product_ids)
+    if missing_product_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown product_id(s): {missing_product_ids[:10]}",
+        )
+
+    rows = [
+        RecommendationEvent(
+            event_type=event.event_type,
+            product_id=event.product_id,
+            customer_id=event.customer_id,
+            branch_id=event.branch_id,
+            device_id=event.device_id,
+            surface=event.surface.strip(),
+            algorithm=event.algorithm,
+            position=event.position,
+            session_id=event.session_id,
+            recommendation_id=event.recommendation_id,
+            event_metadata=event.event_metadata,
+            timestamp=event.timestamp or datetime.utcnow(),
+        )
+        for event in body.events
+    ]
+
+    try:
+        db.add_all(rows)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating recommendation events: {e}")
+        raise HTTPException(status_code=400, detail="Could not create recommendation events")
+
+    return {"inserted": len(rows)}
+
+
 @router.get("/recommendations/performance")
 def get_recommendation_performance(
     branch_id: Optional[str] = None,
@@ -778,19 +851,45 @@ def get_recommendation_performance(
         query = query.filter(Recommendation.branch_id == branch_id)
 
     recommendations = query.all()
-    if not recommendations:
-        return {
-            "total_recommendations": 0,
-            "acceptance_rate": 0,
-            "avg_items_recommended": 0,
-        }
 
     total = len(recommendations)
-    accepted = sum(1 for r in recommendations if getattr(r, "accepted", False))
+    event_filters = [RecommendationEvent.timestamp >= start_date]
+    if branch_id:
+        event_filters.append(RecommendationEvent.branch_id == branch_id)
+
+    event_stats = (
+        db.query(
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "impression", 1), else_=0)
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case((RecommendationEvent.event_type == "click", 1), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case((RecommendationEvent.event_type == "add_to_cart", 1), else_=0)
+                ),
+                0,
+            ),
+        )
+        .filter(*event_filters)
+        .one()
+    )
+    impressions = int(event_stats[0] or 0)
+    clicks = int(event_stats[1] or 0)
+    accepted = int(event_stats[2] or 0)
 
     return {
         "total_recommendations": total,
-        "acceptance_rate": (accepted / total * 100) if total > 0 else 0,
+        "acceptance_rate": (accepted / impressions * 100) if impressions > 0 else 0,
+        "ctr": (clicks / impressions * 100) if impressions > 0 else 0,
+        "impressions": impressions,
+        "clicks": clicks,
+        "accepted": accepted,
         "avg_items_recommended": (
             sum((r.items_count or 0) for r in recommendations) / total
             if total > 0

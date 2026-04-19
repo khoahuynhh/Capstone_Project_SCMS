@@ -1,9 +1,19 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { X, Search, CreditCard, Plus, Minus, Sparkles, User, Brain } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
 import { serverApi } from '../../../core/api/server_api';
 import '../css/ProductRecommendation.css';
 import PaymentInterface from './PaymentInterface';
+
+const getRecommendationSessionId = () => {
+    const key = 'fbrs_recommendation_session_id';
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+
+    const sessionId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.sessionStorage.setItem(key, sessionId);
+    return sessionId;
+};
 
 // --- HELPER: Map data DB (CSV format) -> UI ---
 const mapDbProductToUi = (p) => {
@@ -41,6 +51,13 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const [loadingRecommendations, setLoadingRecommendations] = useState(false);
     const [selectedProduct, setSelectedProduct] = useState(null);
     const [showPayment, setShowPayment] = useState(false);
+    const sessionIdRef = useRef(null);
+    const trackedImpressionsRef = useRef(new Set());
+    const trackedAcceptancesRef = useRef(new Set());
+
+    if (!sessionIdRef.current && typeof window !== 'undefined') {
+        sessionIdRef.current = getRecommendationSessionId();
+    }
 
     useEffect(() => {
         if (!isOpen || !aiContext) {
@@ -136,8 +153,58 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const cartTotal = cart.reduce((sum, item) => sum + (item.finalPrice * item.quantity), 0);
     const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
     const formatMoney = (n) => n.toLocaleString('vi-VN') + 'đ';
+    const branchId = import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
+    const deviceId = import.meta.env.VITE_DEVICE_ID || null;
+
+    const sendRecommendationEvents = (events) => {
+        if (!events.length) return;
+        for (let i = 0; i < events.length; i += 100) {
+            serverApi.recommendationEvents(events.slice(i, i + 100)).catch((error) => {
+                console.error('Lỗi ghi recommendation event:', error);
+            });
+        }
+    };
+
+    const buildRecommendationEvent = (eventType, product, position) => ({
+        event_type: eventType,
+        product_id: Number(product.id),
+        branch_id: branchId,
+        device_id: deviceId,
+        surface: 'face_ai_recommendation',
+        algorithm: 'attribute_ai',
+        position,
+        session_id: sessionIdRef.current,
+        event_metadata: {
+            age: aiContext?.age ?? null,
+            age_group: aiContext?.age_group ?? null,
+            gender: aiContext?.gender ?? null,
+            emotion: aiContext?.emotion ?? null,
+        },
+    });
+
+    useEffect(() => {
+        if (!isOpen || showPayment || isLoading || loadingRecommendations || displayProducts.length === 0) return;
+
+        const events = [];
+        displayProducts.forEach((product, index) => {
+            const position = index + 1;
+            const key = `face_ai_recommendation:${product.id}:${position}:${aiContext?.age ?? ''}:${aiContext?.gender ?? ''}:${aiContext?.emotion ?? ''}`;
+            if (trackedImpressionsRef.current.has(key)) return;
+            trackedImpressionsRef.current.add(key);
+            events.push(buildRecommendationEvent('impression', product, position));
+        });
+
+        sendRecommendationEvents(events);
+    }, [isOpen, showPayment, isLoading, loadingRecommendations, displayProducts, aiContext]);
 
     const addToCart = (product) => {
+        const acceptanceKey = `face_ai_recommendation:${product.id}`;
+        if (!trackedAcceptancesRef.current.has(acceptanceKey)) {
+            trackedAcceptancesRef.current.add(acceptanceKey);
+            sendRecommendationEvents([
+                buildRecommendationEvent('add_to_cart', product, null),
+            ]);
+        }
         setCart(prev => {
             const idx = prev.findIndex(p => p.id === product.id);
             if (idx > -1) {
@@ -219,7 +286,16 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                         ) : (
                             <div className="recoGrid">
                                 {displayProducts.map((product, index) => (
-                                    <div key={product.id} className="recoCard" onClick={() => setSelectedProduct(product)}>
+                                    <div
+                                        key={product.id}
+                                        className="recoCard"
+                                        onClick={() => {
+                                            sendRecommendationEvents([
+                                                buildRecommendationEvent('click', product, index + 1),
+                                            ]);
+                                            setSelectedProduct(product);
+                                        }}
+                                    >
                                         <div className="recoCardImg">
                                             <img src={product.image} alt={product.name} />
                                             {index < 3 && !searchTerm && (
