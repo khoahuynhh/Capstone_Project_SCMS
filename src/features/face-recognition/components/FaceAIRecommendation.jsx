@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { X, Search, CreditCard, Plus, Minus, Sparkles, User, Brain } from 'lucide-react';
+import { X, Search, CreditCard, Plus, Minus, Sparkles, User, Brain, ArrowLeft } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
 import { serverApi } from '../../../core/api/server_api';
 import '../css/ProductRecommendation.css';
@@ -41,6 +41,30 @@ const mapDbProductToUi = (p) => {
     };
 };
 
+const EMOTION_LABELS = {
+    neutral: 'Bình thường',
+    happy: 'Vui vẻ',
+    sad: 'Buồn',
+    angry: 'Tức giận',
+    surprise: 'Ngạc nhiên',
+    surprised: 'Ngạc nhiên',
+    fear: 'Lo lắng',
+    fearful: 'Lo lắng',
+    disgust: 'Không hài lòng',
+    contempt: 'Không hài lòng',
+};
+
+const toDisplayLabel = (value, labels = {}) => {
+    if (value === null || value === undefined || value === '') return 'Chưa có';
+    const key = String(value).trim().toLowerCase();
+    if (labels[key]) return labels[key];
+
+    return key
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
 const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     // aiContext: { gender: 'male'|'female', age: number, emotion: string }
     
@@ -50,6 +74,9 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const [cloudRecommendations, setCloudRecommendations] = useState([]);
     const [loadingRecommendations, setLoadingRecommendations] = useState(false);
     const [selectedProduct, setSelectedProduct] = useState(null);
+    const [relatedProducts, setRelatedProducts] = useState([]);
+    const [isLoadingRelated, setIsLoadingRelated] = useState(false);
+    const [historyStack, setHistoryStack] = useState([]);
     const [showPayment, setShowPayment] = useState(false);
     const sessionIdRef = useRef(null);
     const trackedImpressionsRef = useRef(new Set());
@@ -81,6 +108,35 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
             })
             .finally(() => setLoadingRecommendations(false));
     }, [isOpen, aiContext]);
+
+    useEffect(() => {
+        if (!selectedProduct?.id) {
+            setRelatedProducts([]);
+            setIsLoadingRelated(false);
+            return;
+        }
+
+        let cancelled = false;
+        setIsLoadingRelated(true);
+
+        serverApi.relatedProducts(selectedProduct.id, 5)
+            .then((data) => {
+                if (cancelled) return;
+                setRelatedProducts(Array.isArray(data) ? data.map(mapDbProductToUi) : []);
+            })
+            .catch((error) => {
+                if (cancelled) return;
+                console.error('Lỗi tải sản phẩm liên quan:', error);
+                setRelatedProducts([]);
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoadingRelated(false);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedProduct?.id]);
 
     // --- AI LOGIC: Tính toán độ phù hợp (Scoring Engine) ---
     const displayProducts = useMemo(() => {
@@ -155,6 +211,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const formatMoney = (n) => n.toLocaleString('vi-VN') + 'đ';
     const branchId = import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
     const deviceId = import.meta.env.VITE_DEVICE_ID || null;
+    const emotionLabel = toDisplayLabel(aiContext?.emotion, EMOTION_LABELS);
 
     const sendRecommendationEvents = (events) => {
         if (!events.length) return;
@@ -170,8 +227,8 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
         product_id: Number(product.id),
         branch_id: branchId,
         device_id: deviceId,
-        surface: 'face_ai_recommendation',
-        algorithm: 'attribute_ai',
+        surface: product.recommendationSurface || 'face_ai_recommendation',
+        algorithm: product.recommendationAlgorithm || 'attribute_ai',
         position,
         session_id: sessionIdRef.current,
         event_metadata: {
@@ -179,6 +236,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
             age_group: aiContext?.age_group ?? null,
             gender: aiContext?.gender ?? null,
             emotion: aiContext?.emotion ?? null,
+            source_product_id: product.sourceProductId ?? null,
         },
     });
 
@@ -198,11 +256,12 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     }, [isOpen, showPayment, isLoading, loadingRecommendations, displayProducts, aiContext]);
 
     const addToCart = (product) => {
-        const acceptanceKey = `face_ai_recommendation:${product.id}`;
+        const surface = product.recommendationSurface || 'face_ai_recommendation';
+        const acceptanceKey = `${surface}:${product.id}`;
         if (!trackedAcceptancesRef.current.has(acceptanceKey)) {
             trackedAcceptancesRef.current.add(acceptanceKey);
             sendRecommendationEvents([
-                buildRecommendationEvent('add_to_cart', product, null),
+                buildRecommendationEvent('add_to_cart', product, product.recommendationPosition ?? null),
             ]);
         }
         setCart(prev => {
@@ -228,6 +287,49 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
         });
     };
 
+    useEffect(() => {
+        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) return;
+
+        const events = [];
+        relatedProducts.forEach((product, index) => {
+            const position = index + 1;
+            const key = `face_related_products:${selectedProduct.id}:${product.id}:${position}`;
+            if (trackedImpressionsRef.current.has(key)) return;
+            trackedImpressionsRef.current.add(key);
+            events.push(buildRecommendationEvent('impression', {
+                ...product,
+                recommendationSurface: 'face_related_products',
+                recommendationAlgorithm: 'association_rules',
+                sourceProductId: selectedProduct.id,
+            }, position));
+        });
+
+        sendRecommendationEvents(events);
+    }, [isOpen, showPayment, selectedProduct, relatedProducts]);
+
+    const handleSelectRelatedProduct = (product, position) => {
+        const relatedProduct = {
+            ...product,
+            recommendationSurface: 'face_related_products',
+            recommendationAlgorithm: 'association_rules',
+            recommendationPosition: position,
+            sourceProductId: selectedProduct?.id ?? null,
+        };
+
+        sendRecommendationEvents([buildRecommendationEvent('click', relatedProduct, position)]);
+        setHistoryStack((prev) => [...prev, selectedProduct]);
+        setSelectedProduct(relatedProduct);
+    };
+
+    const handleGoBack = () => {
+        if (historyStack.length === 0) return;
+
+        const nextStack = [...historyStack];
+        const previousProduct = nextStack.pop();
+        setHistoryStack(nextStack);
+        setSelectedProduct(previousProduct);
+    };
+
     const mapCartToPaymentItems = (items) =>
         items.map((item) => ({
             id: Number(item.id),
@@ -251,13 +353,13 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                             <Brain size={32} color="#fff" />
                         </div>
                         <div>
-                            <h2 style={{ margin: 0, color: '#fff', fontSize: '1.5rem' }}>Gợi ý AI thông minh</h2>
+                            <h2 style={{ margin: 0, color: '#fff', fontSize: '1.5rem' }}>Sản phẩm dành cho bạn</h2>
                             <div className="ai-badge-container">
                                 <span className="ai-mini-badge">
                                     <User size={12}/> {aiContext?.gender === 'male' ? 'Nam' : 'Nữ'}
                                 </span>
                                 <span className="ai-mini-badge">{aiContext?.age} tuổi</span>
-                                <span className="ai-mini-badge" style={{textTransform: 'capitalize'}}>{aiContext?.emotion}</span>
+                                <span className="ai-mini-badge">{emotionLabel}</span>
                             </div>
                         </div>
                     </div>
@@ -293,6 +395,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                                             sendRecommendationEvents([
                                                 buildRecommendationEvent('click', product, index + 1),
                                             ]);
+                                            setHistoryStack([]);
                                             setSelectedProduct(product);
                                         }}
                                     >
@@ -361,9 +464,25 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                 </div>
 
                 {selectedProduct && (
-                    <div className="recoDetailOverlay" onClick={() => setSelectedProduct(null)}>
+                    <div className="recoDetailOverlay" onClick={() => {
+                        setSelectedProduct(null);
+                        setHistoryStack([]);
+                    }}>
                         <div className="recoDetailPanel" onClick={(e) => e.stopPropagation()}>
-                            <button className="recoDetailClose" onClick={() => setSelectedProduct(null)}>
+                            {historyStack.length > 0 && (
+                                <button
+                                    className="recoDetailCloseBtn"
+                                    onClick={handleGoBack}
+                                    title="Quay lại sản phẩm trước"
+                                    type="button"
+                                >
+                                    <ArrowLeft size={24} />
+                                </button>
+                            )}
+                            <button className="recoDetailClose" onClick={() => {
+                                setSelectedProduct(null);
+                                setHistoryStack([]);
+                            }}>
                                 <X size={20} />
                             </button>
 
@@ -409,6 +528,35 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                                         </button>
                                     </div>
                                 </div>
+                            </div>
+
+                            <div className="related-products-section">
+                                <h4 className="related-products-title">Sản phẩm liên quan</h4>
+
+                                {isLoadingRelated ? (
+                                    <div className="related-products-status">Đang tải đề xuất...</div>
+                                ) : relatedProducts.length > 0 ? (
+                                    <div className="related-products-list">
+                                        {relatedProducts.map((product, index) => (
+                                            <div
+                                                key={product.id}
+                                                className="related-product-card"
+                                                onClick={() => handleSelectRelatedProduct(product, index + 1)}
+                                                title={product.name}
+                                            >
+                                                <img
+                                                    src={product.image}
+                                                    alt={product.name}
+                                                    className="related-product-image"
+                                                />
+                                                <p className="related-product-name">{product.name}</p>
+                                                <p className="related-product-price">{formatMoney(product.finalPrice)}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="related-products-status">Chưa có dữ liệu mua kèm.</div>
+                                )}
                             </div>
                         </div>
                     </div>

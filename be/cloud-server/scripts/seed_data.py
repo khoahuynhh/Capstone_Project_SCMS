@@ -1,48 +1,54 @@
-# seed_test_data.py
+import csv
 import os
 import random
-import uuid
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from datetime import datetime, timedelta, date
+from pathlib import Path
 
-import pandas as pd
 from passlib.context import CryptContext
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from database.models import (
+    ABExperiment,
+    ABExperimentEvent,
+    AssociationRuleRaw,
     Base,
-    Store,
-    Product,
-    ProductAssociation,
-    Transaction,
-    TransactionItem,
-    Recommendation,
-    UserAccount,
-    Customer,
-    CustomerStats,
-    BranchMetrics,
     BranchInventory,
-    ModelVersion,
+    BranchMetrics,
+    CartAssociationRule,
+    Customer,
+    CustomerConsent,
+    CustomerStats,
     EdgeDevice,
     FaceEvent,
+    FederatedClientUpdate,
+    FederatedLearningRound,
+    InventoryOptimization,
+    ModelPerformanceLog,
+    ModelVersion,
+    PrivacyAuditLog,
+    Product,
+    ProductAssociation,
     Promotion,
     PromotionBranch,
     PromotionProduct,
-    CustomerConsent,
-    PrivacyAuditLog,
-    ABExperiment,
-    ABExperimentEvent,
-    FederatedLearningRound,
-    FederatedClientUpdate,
-    ModelPerformanceLog,
-    InventoryOptimization,
+    Recommendation,
+    Store,
+    Transaction,
+    TransactionItem,
+    UserAccount,
 )
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CLOUD_SERVER_DIR = SCRIPT_DIR.parent
+DEFAULT_PRODUCT_CSV_PATH = CLOUD_SERVER_DIR / "data" / "Products.csv"
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+psycopg2://admin:admin123@localhost:5433/retail_db"
 )
-PRODUCT_CSV_PATH = os.getenv("PRODUCT_CSV_PATH", "./data/Products.csv")
+PRODUCT_CSV_PATH = Path(os.getenv("PRODUCT_CSV_PATH", str(DEFAULT_PRODUCT_CSV_PATH)))
 RANDOM_SEED = int(os.getenv("SEED", "42"))
 SEED_DEFAULT_PASSWORD = os.getenv("SEED_DEFAULT_PASSWORD", "12345678")
 
@@ -50,51 +56,256 @@ random.seed(RANDOM_SEED)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def rand_bool(p=0.5):
-    return random.random() < p
+@dataclass(frozen=True)
+class SeedConfig:
+    profile: str
+    max_products: int
+    customer_count: int
+    transaction_count: int
+    recommendation_per_tx_min: int
+    recommendation_per_tx_max: int
+    max_items_per_tx: int
+    max_assoc_products_per_category: int
+    assoc_links_per_product: int
+    promotion_product_count: int
+    performance_days: int
+    ab_event_count: int
+    fl_round_count: int
+    optimization_product_count: int
+    include_privacy_logs: bool
+    include_modeling_tables: bool
+    include_promotions: bool
 
 
-def rand_date_within(days_back=90):
+def load_seed_config() -> SeedConfig:
+    profile = os.getenv("SEED_PROFILE", "render_free").strip().lower()
+
+    profiles = {
+        "render_free": SeedConfig(
+            profile="render_free",
+            max_products=80,
+            customer_count=24,
+            transaction_count=72,
+            recommendation_per_tx_min=1,
+            recommendation_per_tx_max=3,
+            max_items_per_tx=3,
+            max_assoc_products_per_category=5,
+            assoc_links_per_product=2,
+            promotion_product_count=6,
+            performance_days=3,
+            ab_event_count=18,
+            fl_round_count=2,
+            optimization_product_count=8,
+            include_privacy_logs=False,
+            include_modeling_tables=True,
+            include_promotions=True,
+        ),
+        "compact": SeedConfig(
+            profile="compact",
+            max_products=120,
+            customer_count=40,
+            transaction_count=120,
+            recommendation_per_tx_min=2,
+            recommendation_per_tx_max=3,
+            max_items_per_tx=4,
+            max_assoc_products_per_category=6,
+            assoc_links_per_product=2,
+            promotion_product_count=8,
+            performance_days=5,
+            ab_event_count=40,
+            fl_round_count=2,
+            optimization_product_count=12,
+            include_privacy_logs=True,
+            include_modeling_tables=True,
+            include_promotions=True,
+        ),
+        "full": SeedConfig(
+            profile="full",
+            max_products=300,
+            customer_count=60,
+            transaction_count=180,
+            recommendation_per_tx_min=2,
+            recommendation_per_tx_max=4,
+            max_items_per_tx=5,
+            max_assoc_products_per_category=8,
+            assoc_links_per_product=3,
+            promotion_product_count=12,
+            performance_days=7,
+            ab_event_count=120,
+            fl_round_count=3,
+            optimization_product_count=20,
+            include_privacy_logs=True,
+            include_modeling_tables=True,
+            include_promotions=True,
+        ),
+    }
+
+    config = profiles.get(profile, profiles["render_free"])
+    return SeedConfig(
+        profile=config.profile,
+        max_products=int(os.getenv("SEED_PRODUCT_LIMIT", str(config.max_products))),
+        customer_count=int(
+            os.getenv("SEED_CUSTOMER_COUNT", str(config.customer_count))
+        ),
+        transaction_count=int(
+            os.getenv("SEED_TRANSACTION_COUNT", str(config.transaction_count))
+        ),
+        recommendation_per_tx_min=int(
+            os.getenv(
+                "SEED_RECOMMENDATION_MIN",
+                str(config.recommendation_per_tx_min),
+            )
+        ),
+        recommendation_per_tx_max=int(
+            os.getenv(
+                "SEED_RECOMMENDATION_MAX",
+                str(config.recommendation_per_tx_max),
+            )
+        ),
+        max_items_per_tx=int(
+            os.getenv("SEED_MAX_ITEMS_PER_TX", str(config.max_items_per_tx))
+        ),
+        max_assoc_products_per_category=int(
+            os.getenv(
+                "SEED_ASSOC_PRODUCTS_PER_CATEGORY",
+                str(config.max_assoc_products_per_category),
+            )
+        ),
+        assoc_links_per_product=int(
+            os.getenv(
+                "SEED_ASSOC_LINKS_PER_PRODUCT",
+                str(config.assoc_links_per_product),
+            )
+        ),
+        promotion_product_count=int(
+            os.getenv(
+                "SEED_PROMOTION_PRODUCT_COUNT",
+                str(config.promotion_product_count),
+            )
+        ),
+        performance_days=int(
+            os.getenv("SEED_PERFORMANCE_DAYS", str(config.performance_days))
+        ),
+        ab_event_count=int(os.getenv("SEED_AB_EVENT_COUNT", str(config.ab_event_count))),
+        fl_round_count=int(os.getenv("SEED_FL_ROUND_COUNT", str(config.fl_round_count))),
+        optimization_product_count=int(
+            os.getenv(
+                "SEED_OPTIMIZATION_PRODUCT_COUNT",
+                str(config.optimization_product_count),
+            )
+        ),
+        include_privacy_logs=os.getenv(
+            "SEED_INCLUDE_PRIVACY_LOGS",
+            str(config.include_privacy_logs),
+        ).lower()
+        == "true",
+        include_modeling_tables=os.getenv(
+            "SEED_INCLUDE_MODELING_TABLES",
+            str(config.include_modeling_tables),
+        ).lower()
+        == "true",
+        include_promotions=os.getenv(
+            "SEED_INCLUDE_PROMOTIONS",
+            str(config.include_promotions),
+        ).lower()
+        == "true",
+    )
+
+
+SEED_CONFIG = load_seed_config()
+
+
+FIRST_NAMES = [
+    "An",
+    "Binh",
+    "Chi",
+    "Dung",
+    "Ha",
+    "Huy",
+    "Khanh",
+    "Lan",
+    "Linh",
+    "Minh",
+    "My",
+    "Nam",
+    "Ngoc",
+    "Phuc",
+    "Quan",
+    "Trang",
+    "Vy",
+]
+LAST_NAMES = ["Nguyen", "Tran", "Le", "Pham", "Hoang", "Phan", "Vu", "Dang"]
+SEGMENTS = ["VIP", "Potential", "Churn Risk", "Loyal", "New"]
+AGE_GROUPS = ["18_24", "25_34", "35_44", "45_54"]
+GENDERS = ["male", "female", "unisex"]
+FAVORITE_CATEGORIES = [
+    "Snack",
+    "Beverage",
+    "Dairy",
+    "Spice",
+    "Personal Care",
+]
+
+
+def rand_bool(probability: float = 0.5) -> bool:
+    return random.random() < probability
+
+
+def rand_date_within(days_back: int = 90) -> datetime:
     return datetime.utcnow() - timedelta(
-        days=random.randint(0, days_back),
+        days=random.randint(0, max(days_back, 0)),
         hours=random.randint(0, 23),
         minutes=random.randint(0, 59),
     )
 
 
-def chunked(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i : i + n]
-
-
 def create_session():
     engine = create_engine(DATABASE_URL, future=True)
     Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    return SessionLocal()
+    session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    return session_local()
 
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
+def parse_decimal(value, fallback: str = "0") -> Decimal:
+    try:
+        return Decimal(str(round(float(value), 2)))
+    except (TypeError, ValueError):
+        return Decimal(fallback)
+
+
+def nullable_str(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def load_product_rows(limit: int) -> list[dict]:
+    csv_path = PRODUCT_CSV_PATH
+    if not csv_path.exists() and DEFAULT_PRODUCT_CSV_PATH.exists():
+        csv_path = DEFAULT_PRODUCT_CSV_PATH
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Product CSV not found: {PRODUCT_CSV_PATH}")
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+
+    if limit <= 0:
+        return rows
+    return rows[:limit]
+
+
 def seed_stores_and_devices(db):
     stores = [
-        Store(
-            id="HCM_Q1",
-            name="Mart Quận 1",
-            address="12 Nguyễn Huệ, Quận 1, HCM",
-        ),
-        Store(
-            id="HCM_Q7",
-            name="Mart Quận 7",
-            address="99 Nguyễn Thị Thập, Quận 7, HCM",
-        ),
-        Store(
-            id="HN_CG",
-            name="Mart Cầu Giấy",
-            address="45 Trần Thái Tông, Cầu Giấy, Hà Nội",
-        ),
+        Store(id="HCM_Q1", name="Mart Quan 1", address="12 Nguyen Hue, Quan 1, HCM"),
+        Store(id="HCM_Q7", name="Mart Quan 7", address="99 Nguyen Thi Thap, Quan 7, HCM"),
+        Store(id="HN_CG", name="Mart Cau Giay", address="45 Tran Thai Tong, Cau Giay, Ha Noi"),
     ]
     db.add_all(stores)
     db.flush()
@@ -104,7 +315,7 @@ def seed_stores_and_devices(db):
             id="EDGE_HCM_Q1_01",
             branch_id="HCM_Q1",
             name="Edge Cam Q1 - 01",
-            description="Thiết bị edge nhận diện tại cửa vào",
+            description="Entrance camera",
             ip_address="192.168.1.11",
             status="active",
             last_seen=datetime.utcnow(),
@@ -113,7 +324,7 @@ def seed_stores_and_devices(db):
             id="EDGE_HCM_Q7_01",
             branch_id="HCM_Q7",
             name="Edge Cam Q7 - 01",
-            description="Thiết bị edge nhận diện tại quầy thanh toán",
+            description="Checkout camera",
             ip_address="192.168.1.21",
             status="active",
             last_seen=datetime.utcnow(),
@@ -121,8 +332,8 @@ def seed_stores_and_devices(db):
         EdgeDevice(
             id="EDGE_HN_CG_01",
             branch_id="HN_CG",
-            name="Edge Cam Cầu Giấy - 01",
-            description="Thiết bị edge nhận diện tại cửa vào",
+            name="Edge Cam Cau Giay - 01",
+            description="Entrance camera",
             ip_address="192.168.1.31",
             status="active",
             last_seen=datetime.utcnow(),
@@ -133,61 +344,46 @@ def seed_stores_and_devices(db):
     return stores, devices
 
 
-def seed_products_from_csv(db):
-    df = pd.read_csv(PRODUCT_CSV_PATH)
-
+def seed_products_from_csv(db, config: SeedConfig):
+    rows = load_product_rows(config.max_products)
     products = []
-    for _, row in df.iterrows():
-        base_price = Decimal(str(round(float(row["price"]), 2)))
-        has_discount = rand_bool(0.35)
 
-        discount_percent = (
-            round(random.choice([5, 10, 15, 20]), 2) if has_discount else 0.0
-        )
+    for row in rows:
+        base_price = parse_decimal(row.get("price"), "0")
+        has_discount = rand_bool(0.25)
+        discount_percent = random.choice([5, 10, 15]) if has_discount else None
         discount_price = (
-            float(base_price) * (1 - discount_percent / 100) if has_discount else None
+            round(float(base_price) * (1 - discount_percent / 100), 2)
+            if discount_percent
+            else None
         )
 
-        description = (
-            f"{row['name']} thuộc nhóm {row['category']}, "
-            f"phù hợp cho ngữ cảnh '{row.get('usage_context', 'daily')}'."
-        )
+        stock_value = row.get("stock")
+        try:
+            stock = int(float(stock_value)) if stock_value not in (None, "") else random.randint(5, 60)
+        except ValueError:
+            stock = random.randint(5, 60)
 
-        product = Product(
-            product_code=str(row["product_code"]),
-            name=str(row["name"]),
-            volume=None if pd.isna(row.get("volume")) else str(row.get("volume")),
-            price=base_price,
-            discount_price=round(discount_price, 2) if discount_price else None,
-            discount_percent=discount_percent if has_discount else None,
-            category=None if pd.isna(row.get("category")) else str(row.get("category")),
-            stock=(
-                int(row["stock"])
-                if not pd.isna(row.get("stock"))
-                else random.randint(5, 100)
-            ),
-            description=description,
-            image_url=(
-                None if pd.isna(row.get("image_url")) else str(row.get("image_url"))
-            ),
-            emotion=None if pd.isna(row.get("mood_tag")) else str(row.get("mood_tag")),
-            target_age_group=(
-                None
-                if pd.isna(row.get("target_age_group"))
-                else str(row.get("target_age_group"))
-            ),
-            target_gender=(
-                None
-                if pd.isna(row.get("target_gender"))
-                else str(row.get("target_gender"))
-            ),
-            usage_context=(
-                None
-                if pd.isna(row.get("usage_context"))
-                else str(row.get("usage_context"))
-            ),
+        category = nullable_str(row.get("category")) or "General"
+
+        products.append(
+            Product(
+                product_code=str(row.get("product_code") or f"P{len(products) + 1:05d}"),
+                name=str(row.get("name") or f"Product {len(products) + 1}"),
+                volume=nullable_str(row.get("volume")),
+                price=base_price,
+                discount_price=discount_price,
+                discount_percent=discount_percent,
+                category=category,
+                stock=stock,
+                description=f"{category} product for demo data.",
+                image_url=nullable_str(row.get("image_url")),
+                emotion=nullable_str(row.get("mood_tag")),
+                target_age_group=nullable_str(row.get("target_age_group")),
+                target_gender=nullable_str(row.get("target_gender")),
+                usage_context=nullable_str(row.get("usage_context")),
+            )
         )
-        products.append(product)
 
     db.add_all(products)
     db.flush()
@@ -197,111 +393,138 @@ def seed_products_from_csv(db):
 def seed_branch_inventory(db, stores, products):
     rows = []
     for store in stores:
-        for p in products:
-            stock = max(0, int((p.stock or 0) * random.uniform(0.4, 1.2)))
-            reserved = random.randint(0, min(stock, 8)) if stock > 0 else 0
+        for product in products:
+            stock = max(0, int((product.stock or 0) * random.uniform(0.5, 1.1)))
+            reserved = random.randint(0, min(stock, 5)) if stock > 0 else 0
             rows.append(
                 BranchInventory(
                     branch_id=store.id,
-                    product_id=p.id,
+                    product_id=product.id,
                     stock=stock,
                     reserved=reserved,
                 )
             )
+
     db.add_all(rows)
     db.flush()
 
 
-def seed_product_associations(db, products):
+def seed_product_associations(db, products, config: SeedConfig):
     by_category = {}
-    for p in products:
-        by_category.setdefault(p.category or "Khác", []).append(p)
+    for product in products:
+        by_category.setdefault(product.category or "General", []).append(product)
 
-    associations = []
-    for _, group in by_category.items():
+    associations = {}
+    cart_rules = []
+    for group in by_category.values():
         if len(group) < 2:
             continue
 
-        sample_group = random.sample(group, min(len(group), 8))
+        sample_size = min(len(group), config.max_assoc_products_per_category)
+        sample_group = random.sample(group, sample_size)
         for product in sample_group:
-            related_candidates = [x for x in sample_group if x.id != product.id]
-            for related in random.sample(
-                related_candidates, min(3, len(related_candidates))
+            related_candidates = [item for item in sample_group if item.id != product.id]
+            if not related_candidates:
+                continue
+
+            related_count = min(config.assoc_links_per_product, len(related_candidates))
+            for related in random.sample(related_candidates, related_count):
+                raw_rule = AssociationRuleRaw(
+                    antecedent_product_ids=[product.id],
+                    consequent_product_ids=[related.id],
+                    antecedent_size=1,
+                    consequent_size=1,
+                    confidence=round(random.uniform(0.45, 0.9), 2),
+                    lift=round(random.uniform(1.05, 2.1), 2),
+                    support=round(random.uniform(0.02, 0.18), 3),
+                    algorithm="seed",
+                    is_active=True,
+                )
+                db.add(raw_rule)
+                db.flush()
+                associations[(product.id, related.id)] = ProductAssociation(
+                    source_rule_id=raw_rule.id,
+                    product_id=product.id,
+                    related_product_id=related.id,
+                    confidence=raw_rule.confidence,
+                    lift=raw_rule.lift,
+                    support=raw_rule.support,
+                )
+
+        if len(sample_group) >= 3:
+            for bundle in random.sample(
+                sample_group,
+                min(3, max(1, len(sample_group) // 4)),
             ):
-                associations.append(
-                    ProductAssociation(
-                        product_id=product.id,
-                        related_product_id=related.id,
-                        confidence=round(random.uniform(0.45, 0.92), 2),
-                        lift=round(random.uniform(1.05, 2.4), 2),
-                        support=round(random.uniform(0.02, 0.25), 3),
+                antecedents = [
+                    item.id
+                    for item in random.sample(
+                        [item for item in sample_group if item.id != bundle.id],
+                        2,
+                    )
+                ]
+                raw_rule = AssociationRuleRaw(
+                    antecedent_product_ids=sorted(antecedents),
+                    consequent_product_ids=[bundle.id],
+                    antecedent_size=2,
+                    consequent_size=1,
+                    confidence=round(random.uniform(0.35, 0.75), 2),
+                    lift=round(random.uniform(1.05, 2.5), 2),
+                    support=round(random.uniform(0.01, 0.12), 3),
+                    algorithm="seed",
+                    is_active=True,
+                )
+                db.add(raw_rule)
+                db.flush()
+                cart_rules.append(
+                    CartAssociationRule(
+                        source_rule_id=raw_rule.id,
+                        antecedent_product_ids=raw_rule.antecedent_product_ids,
+                        consequent_product_ids=raw_rule.consequent_product_ids,
+                        antecedent_size=raw_rule.antecedent_size,
+                        consequent_size=raw_rule.consequent_size,
+                        confidence=raw_rule.confidence,
+                        lift=raw_rule.lift,
+                        support=raw_rule.support,
                     )
                 )
 
-    unique_pairs = {}
-    for a in associations:
-        unique_pairs[(a.product_id, a.related_product_id)] = a
-
-    db.add_all(list(unique_pairs.values()))
+    db.add_all(list(associations.values()))
+    db.add_all(cart_rules)
     db.flush()
 
 
-FIRST_NAMES = [
-    "An",
-    "Bình",
-    "Chi",
-    "Dũng",
-    "Hà",
-    "Huy",
-    "Khánh",
-    "Lan",
-    "Linh",
-    "Minh",
-    "My",
-    "Nam",
-    "Ngọc",
-    "Phúc",
-    "Quân",
-    "Trang",
-    "Vy",
-]
-LAST_NAMES = ["Nguyễn", "Trần", "Lê", "Phạm", "Hoàng", "Phan", "Vũ", "Đặng"]
-SEGMENTS = ["VIP", "Potential", "Churn Risk", "Loyal", "New"]
-AGE_GROUPS = ["18_24", "25_34", "35_44", "45_54"]
-GENDERS = ["male", "female", "unisex"]
-
-
-def seed_customers(db, stores, count=60):
+def seed_customers(db, stores, config: SeedConfig):
     customers = []
     stats_rows = []
     consent_rows = []
     user_accounts = []
     audit_logs = []
 
-    for i in range(1, count + 1):
+    for index in range(1, config.customer_count + 1):
         first_name = random.choice(FIRST_NAMES)
         last_name = random.choice(LAST_NAMES)
         age = random.randint(18, 54)
         birth_year = datetime.utcnow().year - age
 
         customer = Customer(
-            customer_id=f"CUS{i:04d}",
+            customer_id=f"CUS{index:04d}",
             first_name=first_name,
             last_name=last_name,
             phone=f"09{random.randint(10000000, 99999999)}",
-            email=f"customer{i:04d}@gmail.com",
+            email=f"customer{index:04d}@gmail.com",
             cccd=f"{random.randint(100000000000, 999999999999)}",
             address=f"{random.randint(1, 300)} Demo Street",
             birth_date=date(birth_year, random.randint(1, 12), random.randint(1, 28)),
             age=age,
             age_group=random.choice(AGE_GROUPS),
             gender=random.choice(GENDERS),
-            description="Khách hàng seed để test UI",
+            description="Demo customer",
             preferred_branch=random.choice(stores).id,
-            avg_basket_size=round(random.uniform(80000, 450000), 2),
-            first_seen=rand_date_within(180),
+            avg_basket_size=round(random.uniform(80000, 350000), 2),
+            first_seen=rand_date_within(120),
             last_seen=rand_date_within(10),
-            created_at=rand_date_within(180),
+            created_at=rand_date_within(120),
         )
         customers.append(customer)
 
@@ -312,40 +535,32 @@ def seed_customers(db, stores, count=60):
         stats_rows.append(
             CustomerStats(
                 customer_id=customer.id,
-                total_transactions=random.randint(0, 25),
-                total_spent=Decimal(str(round(random.uniform(100000, 7000000), 2))),
-                avg_basket_size=Decimal(str(round(random.uniform(80000, 450000), 2))),
-                favorite_categories=random.sample(
-                    [
-                        "Snack",
-                        "Nước giải khát",
-                        "Sữa & chế phẩm",
-                        "Gia vị",
-                        "Chăm sóc cá nhân",
-                    ],
-                    k=3,
-                ),
+                total_transactions=random.randint(0, 12),
+                total_spent=Decimal(str(round(random.uniform(100000, 3000000), 2))),
+                avg_basket_size=Decimal(str(round(random.uniform(80000, 350000), 2))),
+                favorite_categories=random.sample(FAVORITE_CATEGORIES, k=3),
                 last_purchase_date=rand_date_within(30),
                 rank_score=round(random.uniform(10, 100), 2),
                 segment=random.choice(SEGMENTS),
             )
         )
 
-        consent = CustomerConsent(
-            customer_id=customer.id,
-            face_recognition_consent=rand_bool(0.75),
-            data_collection_consent=rand_bool(0.85),
-            marketing_consent=rand_bool(0.55),
-            opted_out=rand_bool(0.1),
-            opted_out_at=rand_date_within(60) if rand_bool(0.1) else None,
-            opt_out_reason="Không muốn nhận marketing" if rand_bool(0.08) else None,
-            consent_method=random.choice(["kiosk", "mobile", "staff"]),
-            consent_ip_address=f"10.0.0.{random.randint(2, 254)}",
-            consent_location=random.choice(["Q1 kiosk", "Q7 kiosk", "HN app"]),
-            data_retention_until=datetime.utcnow()
-            + timedelta(days=random.randint(90, 365)),
+        consent_rows.append(
+            CustomerConsent(
+                customer_id=customer.id,
+                face_recognition_consent=rand_bool(0.75),
+                data_collection_consent=rand_bool(0.85),
+                marketing_consent=rand_bool(0.55),
+                opted_out=rand_bool(0.08),
+                opted_out_at=rand_date_within(60) if rand_bool(0.08) else None,
+                opt_out_reason="No marketing" if rand_bool(0.05) else None,
+                consent_method=random.choice(["kiosk", "mobile", "staff"]),
+                consent_ip_address=f"10.0.0.{random.randint(2, 254)}",
+                consent_location=random.choice(["Q1 kiosk", "Q7 kiosk", "HN app"]),
+                data_retention_until=datetime.utcnow()
+                + timedelta(days=random.randint(90, 365)),
+            )
         )
-        consent_rows.append(consent)
 
         user_accounts.append(
             UserAccount(
@@ -355,37 +570,36 @@ def seed_customers(db, stores, count=60):
             )
         )
 
-        audit_logs.append(
-            PrivacyAuditLog(
-                customer_id=customer.id,
-                operation_type=random.choice(
-                    ["consent_given", "consent_updated", "data_accessed"]
-                ),
-                operation_details={
-                    "source": "seed_script",
-                    "note": "Generated for UI testing",
-                },
-                performed_by=customer.customer_id,
-                performed_by_role="customer",
-                ip_address=f"10.0.1.{random.randint(2, 254)}",
-                success=True,
-                timestamp=rand_date_within(30),
+        if config.include_privacy_logs:
+            audit_logs.append(
+                PrivacyAuditLog(
+                    customer_id=customer.id,
+                    operation_type=random.choice(
+                        ["consent_given", "consent_updated", "data_accessed"]
+                    ),
+                    operation_details={"source": "seed_script"},
+                    performed_by=customer.customer_id,
+                    performed_by_role="customer",
+                    ip_address=f"10.0.1.{random.randint(2, 254)}",
+                    success=True,
+                    timestamp=rand_date_within(30),
+                )
             )
-        )
 
     db.add_all(stats_rows)
     db.add_all(consent_rows)
     db.add_all(user_accounts)
-    db.add_all(audit_logs)
+    if audit_logs:
+        db.add_all(audit_logs)
     db.flush()
     return customers
 
 
-def seed_promotions(db, stores, products):
-    promos = [
+def seed_promotions(db, stores, products, config: SeedConfig):
+    promotions = [
         Promotion(
             code="WEEKEND10",
-            name="Cuối tuần giảm 10%",
+            name="Weekend 10 percent off",
             discount_type="PERCENT",
             start_at=datetime.utcnow() - timedelta(days=3),
             end_at=datetime.utcnow() + timedelta(days=7),
@@ -393,128 +607,137 @@ def seed_promotions(db, stores, products):
         ),
         Promotion(
             code="COMBOFIX",
-            name="Combo ưu đãi giá cố định",
+            name="Fixed combo discount",
             discount_type="FIXED",
             start_at=datetime.utcnow() - timedelta(days=5),
             end_at=datetime.utcnow() + timedelta(days=10),
             is_active=True,
         ),
     ]
-    db.add_all(promos)
+    db.add_all(promotions)
     db.flush()
 
-    for promo in promos:
+    for promotion in promotions:
         target_stores = random.sample(stores, k=random.randint(1, len(stores)))
         for store in target_stores:
-            db.add(PromotionBranch(promotion_id=promo.id, branch_id=store.id))
+            db.add(PromotionBranch(promotion_id=promotion.id, branch_id=store.id))
 
-        target_products = random.sample(products, k=min(12, len(products)))
-        for p in target_products:
-            value = (
+        target_products = random.sample(
+            products, k=min(config.promotion_product_count, len(products))
+        )
+        for product in target_products:
+            discount_value = (
                 10
-                if promo.discount_type == "PERCENT"
-                else random.choice([5000, 10000, 15000])
+                if promotion.discount_type == "PERCENT"
+                else random.choice([5000, 10000])
             )
             db.add(
                 PromotionProduct(
-                    promotion_id=promo.id,
-                    product_id=p.id,
-                    discount_value=float(value),
-                    max_qty_per_customer=random.choice([1, 2, 3, None]),
+                    promotion_id=promotion.id,
+                    product_id=product.id,
+                    discount_value=float(discount_value),
+                    max_qty_per_customer=random.choice([1, 2, None]),
                 )
             )
+
     db.flush()
 
 
-def seed_transactions_and_related(db, stores, devices, products, customers, count=180):
-    transactions = []
+def build_recommendation_payload(products):
+    return [
+        {
+            "product_id": product.id,
+            "product_code": product.product_code,
+            "score": round(random.uniform(0.6, 0.98), 2),
+        }
+        for product in products
+    ]
+
+
+def seed_transactions_and_related(db, stores, devices, products, customers, config: SeedConfig):
     recommendations = []
     face_events = []
     branch_metrics_map = {}
 
-    for i in range(1, count + 1):
-        store = random.choice(stores)
-        device = random.choice([d for d in devices if d.branch_id == store.id])
-        customer = random.choice(customers) if rand_bool(0.8) else None
+    devices_by_branch = {}
+    for device in devices:
+        devices_by_branch.setdefault(device.branch_id, []).append(device)
 
-        purchased_products = random.sample(products, k=random.randint(1, 5))
+    for index in range(1, config.transaction_count + 1):
+        store = random.choice(stores)
+        device = random.choice(devices_by_branch[store.id])
+        customer = random.choice(customers) if rand_bool(0.75) else None
+        purchased_products = random.sample(
+            products, k=random.randint(1, min(config.max_items_per_tx, len(products)))
+        )
         transaction_time = rand_date_within(45)
 
-        items = []
         items_data = []
         total_amount = 0.0
+        transaction = Transaction(
+            branch_id=store.id,
+            transaction_id=f"TXN-{transaction_time.strftime('%Y%m%d')}-{index:05d}",
+            timestamp=transaction_time,
+            customer_id=customer.id if customer else None,
+            device_id=device.id,
+            items_data=[],
+            items_count=0,
+            total_amount=0,
+            recommended_items=[],
+            created_at=transaction_time,
+        )
+        db.add(transaction)
+        db.flush()
 
-        for p in purchased_products:
+        for product in purchased_products:
             qty = random.randint(1, 3)
-            unit_price = float(p.discount_price or p.price)
+            unit_price = float(product.discount_price or product.price)
             total_amount += qty * unit_price
             items_data.append(
                 {
-                    "product_id": p.id,
-                    "product_code": p.product_code,
-                    "name": p.name,
+                    "product_id": product.id,
+                    "product_code": product.product_code,
                     "qty": qty,
                     "unit_price": unit_price,
                 }
             )
-
-        tx = Transaction(
-            branch_id=store.id,
-            transaction_id=f"TXN-{transaction_time.strftime('%Y%m%d')}-{i:05d}",
-            timestamp=transaction_time,
-            customer_id=customer.id if customer else None,
-            device_id=device.id,
-            items_data=items_data,
-            items_count=len(items_data),
-            total_amount=round(total_amount, 2),
-            recommended_items=[],
-            created_at=transaction_time,
-        )
-        db.add(tx)
-        db.flush()
-
-        for item_data in items_data:
-            items.append(
+            db.add(
                 TransactionItem(
-                    transaction_id=tx.id,
-                    product_id=item_data["product_id"],
-                    qty=item_data["qty"],
-                    unit_price=item_data["unit_price"],
+                    transaction_id=transaction.id,
+                    product_id=product.id,
+                    qty=qty,
+                    unit_price=unit_price,
                 )
             )
-        db.add_all(items)
 
-        rec_candidates = random.sample(products, k=random.randint(2, 4))
-        recommended_payload = [
-            {
-                "product_id": p.id,
-                "product_code": p.product_code,
-                "name": p.name,
-                "score": round(random.uniform(0.6, 0.98), 2),
-            }
-            for p in rec_candidates
-        ]
-        tx.recommended_items = recommended_payload
-
-        rec = Recommendation(
-            branch_id=store.id,
-            transaction_id=tx.transaction_id,
-            timestamp=transaction_time - timedelta(minutes=random.randint(1, 10)),
-            customer_id=customer.id if customer else None,
-            device_id=device.id,
-            face_attributes={
-                "age_group": (
-                    customer.age_group if customer else random.choice(AGE_GROUPS)
-                ),
-                "gender": (
-                    customer.gender if customer else random.choice(["male", "female"])
-                ),
-            },
-            recommended_products=recommended_payload,
-            items_count=len(recommended_payload),
-            created_at=transaction_time,
+        rec_count = random.randint(
+            config.recommendation_per_tx_min,
+            min(config.recommendation_per_tx_max, len(products)),
         )
-        recommendations.append(rec)
+        recommended_products = random.sample(products, k=rec_count)
+        recommended_payload = build_recommendation_payload(recommended_products)
+
+        transaction.items_data = items_data
+        transaction.items_count = len(items_data)
+        transaction.total_amount = round(total_amount, 2)
+        transaction.recommended_items = recommended_payload
+
+        recommendations.append(
+            Recommendation(
+                branch_id=store.id,
+                transaction_id=transaction.transaction_id,
+                timestamp=transaction_time - timedelta(minutes=random.randint(1, 10)),
+                customer_id=customer.id if customer else None,
+                device_id=device.id,
+                face_attributes={
+                    "age_group": customer.age_group if customer else random.choice(AGE_GROUPS),
+                    "gender": customer.gender if customer else random.choice(["male", "female"]),
+                },
+                recommended_products=recommended_payload,
+                items_count=len(recommended_payload),
+                created_at=transaction_time,
+            )
+        )
 
         face_events.append(
             FaceEvent(
@@ -525,16 +748,10 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
                 customer_id=customer.id if (customer and rand_bool(0.7)) else None,
                 similarity=round(random.uniform(0.72, 0.98), 2) if customer else None,
                 face_attributes={
-                    "age_group": (
-                        customer.age_group if customer else random.choice(AGE_GROUPS)
-                    ),
-                    "gender": (
-                        customer.gender
-                        if customer
-                        else random.choice(["male", "female"])
-                    ),
+                    "age_group": customer.age_group if customer else random.choice(AGE_GROUPS),
+                    "gender": customer.gender if customer else random.choice(["male", "female"]),
                 },
-                transaction_id=tx.transaction_id,
+                transaction_id=transaction.transaction_id,
                 created_at=transaction_time,
             )
         )
@@ -551,84 +768,85 @@ def seed_transactions_and_related(db, stores, devices, products, customers, coun
         branch_metrics_map[metric_key]["total_revenue"] += total_amount
         branch_metrics_map[metric_key]["total_recommendations"] += 1
 
-        transactions.append(tx)
-
     db.add_all(recommendations)
     db.add_all(face_events)
     db.flush()
 
     metrics_rows = []
-    for (branch_id, metric_date), agg in branch_metrics_map.items():
-        total_tx = agg["total_transactions"]
-        total_recs = agg["total_recommendations"]
+    product_names = [product.name for product in products]
+    low_stock_names = [product.name for product in products if (product.stock or 0) < 5]
 
+    for (branch_id, metric_date), aggregated in branch_metrics_map.items():
+        total_transactions = aggregated["total_transactions"]
         metrics_rows.append(
             BranchMetrics(
                 branch_id=branch_id,
                 date=metric_date,
-                total_transactions=total_tx,
-                total_revenue=round(agg["total_revenue"], 2),
+                total_transactions=total_transactions,
+                total_revenue=round(aggregated["total_revenue"], 2),
                 avg_transaction_value=(
-                    round(agg["total_revenue"] / total_tx, 2) if total_tx else 0
+                    round(aggregated["total_revenue"] / total_transactions, 2)
+                    if total_transactions
+                    else 0
                 ),
-                total_recommendations=total_recs,
+                total_recommendations=aggregated["total_recommendations"],
                 avg_latency_ms=round(random.uniform(60, 220), 2),
-                inference_count=random.randint(50, 500),
+                inference_count=random.randint(20, 200),
                 top_selling_products=random.sample(
-                    [p.name for p in products], k=min(5, len(products))
+                    product_names, k=min(3, len(product_names))
                 ),
                 out_of_stock_items=random.sample(
-                    [p.name for p in products if (p.stock or 0) < 5],
-                    k=min(3, len([p for p in products if (p.stock or 0) < 5])),
-                ),
+                    low_stock_names, k=min(2, len(low_stock_names))
+                )
+                if low_stock_names
+                else [],
                 created_at=datetime.utcnow(),
             )
         )
 
     db.add_all(metrics_rows)
     db.flush()
-    return transactions
 
 
-def seed_modeling_tables(db, stores, products, devices, customers):
+def seed_modeling_tables(db, stores, products, devices, customers, config: SeedConfig):
     model_versions = [
         ModelVersion(
             version="recommender_v1.0.0",
             model_type="recommender",
             model_path="/models/recommender_v1.pkl",
-            model_size_mb=128.4,
+            model_size_mb=96.4,
             accuracy=0.84,
             precision=0.81,
             recall=0.78,
             f1_score=0.79,
             training_date=datetime.utcnow() - timedelta(days=30),
-            deployed_to_branches=[s.id for s in stores],
+            deployed_to_branches=[store.id for store in stores],
             is_active=False,
         ),
         ModelVersion(
             version="recommender_v1.1.0",
             model_type="recommender",
             model_path="/models/recommender_v1_1.pkl",
-            model_size_mb=132.1,
+            model_size_mb=101.2,
             accuracy=0.88,
             precision=0.85,
             recall=0.83,
             f1_score=0.84,
             training_date=datetime.utcnow() - timedelta(days=7),
-            deployed_to_branches=[s.id for s in stores],
+            deployed_to_branches=[store.id for store in stores],
             is_active=True,
         ),
     ]
     db.add_all(model_versions)
     db.flush()
 
-    perf_logs = []
-    for mv in model_versions:
+    performance_logs = []
+    for model_version in model_versions:
         for store in stores:
-            for days_ago in range(7):
-                perf_logs.append(
+            for days_ago in range(config.performance_days):
+                performance_logs.append(
                     ModelPerformanceLog(
-                        model_version=mv.version,
+                        model_version=model_version.version,
                         date=datetime.utcnow() - timedelta(days=days_ago),
                         branch_id=store.id,
                         precision_at_5=round(random.uniform(0.65, 0.93), 3),
@@ -639,150 +857,152 @@ def seed_modeling_tables(db, stores, products, devices, customers):
                         p95_latency_ms=round(random.uniform(100, 240), 2),
                     )
                 )
-    db.add_all(perf_logs)
+    db.add_all(performance_logs)
 
-    exp = ABExperiment(
+    experiment = ABExperiment(
         experiment_id="EXP_REC_001",
         experiment_name="Recommendation Ranking UI Test",
         variant_a={"model_version": "recommender_v1.0.0", "layout": "control"},
         variant_b={"model_version": "recommender_v1.1.0", "layout": "carousel_v2"},
         split_ratio=0.5,
-        target_branches=[s.id for s in stores],
+        target_branches=[store.id for store in stores],
         target_metric="ctr",
         status="running",
         start_date=datetime.utcnow() - timedelta(days=14),
         end_date=datetime.utcnow() + timedelta(days=14),
     )
-    db.add(exp)
+    db.add(experiment)
     db.flush()
 
+    device_by_branch = {}
+    for device in devices:
+        device_by_branch.setdefault(device.branch_id, []).append(device)
+
     ab_events = []
-    for _ in range(120):
+    for _ in range(config.ab_event_count):
         customer = random.choice(customers) if rand_bool(0.7) else None
         store = random.choice(stores)
-        device = random.choice([d for d in devices if d.branch_id == store.id])
-
+        device = random.choice(device_by_branch[store.id])
         variant = random.choice(["a", "b"])
         converted = rand_bool(0.38 if variant == "a" else 0.48)
-        metric_value = round(random.uniform(0, 500000), 2) if converted else 0.0
 
         ab_events.append(
             ABExperimentEvent(
-                experiment_id=exp.experiment_id,
+                experiment_id=experiment.experiment_id,
                 variant=variant,
                 branch_id=store.id,
                 customer_id=customer.id if customer else None,
                 device_id=device.id,
                 converted=converted,
-                metric_value=metric_value,
+                metric_value=round(random.uniform(0, 250000), 2) if converted else 0.0,
                 timestamp=rand_date_within(20),
             )
         )
     db.add_all(ab_events)
 
-    fl_rounds = []
-    for round_num in range(1, 4):
-        fl_rounds.append(
+    rounds = []
+    for round_number in range(1, config.fl_round_count + 1):
+        rounds.append(
             FederatedLearningRound(
-                round_number=round_num,
+                round_number=round_number,
                 model_type="recommender",
                 aggregation_method="fedavg",
-                participating_branches=[s.id for s in stores],
+                participating_branches=[store.id for store in stores],
                 total_branches=len(stores),
-                status="completed" if round_num < 3 else "aggregating",
-                started_at=datetime.utcnow() - timedelta(days=10 - round_num),
+                status="completed" if round_number < config.fl_round_count else "aggregating",
+                started_at=datetime.utcnow() - timedelta(days=10 - round_number),
                 completed_at=(
-                    datetime.utcnow() - timedelta(days=9 - round_num)
-                    if round_num < 3
+                    datetime.utcnow() - timedelta(days=9 - round_number)
+                    if round_number < config.fl_round_count
                     else None
                 ),
             )
         )
-    db.add_all(fl_rounds)
+    db.add_all(rounds)
     db.flush()
 
     updates = []
-    for round_num in range(1, 4):
+    for round_number in range(1, config.fl_round_count + 1):
         for store in stores:
             updates.append(
                 FederatedClientUpdate(
-                    round_number=round_num,
+                    round_number=round_number,
                     branch_id=store.id,
-                    update_path=f"/fl/round_{round_num}/{store.id}.npy",
-                    update_size_mb=round(random.uniform(3.2, 18.5), 2),
+                    update_path=f"/fl/round_{round_number}/{store.id}.npy",
+                    update_size_mb=round(random.uniform(3.2, 12.0), 2),
                     local_loss=round(random.uniform(0.1, 0.8), 4),
                     local_accuracy=round(random.uniform(0.7, 0.96), 4),
-                    local_samples_count=random.randint(100, 2000),
-                    status=random.choice(["received", "aggregated", "received"]),
+                    local_samples_count=random.randint(100, 800),
+                    status=random.choice(["received", "aggregated"]),
                 )
             )
     db.add_all(updates)
 
-    optimizations = []
+    optimizations = {}
     for store in stores:
-        for p in random.sample(products, k=min(20, len(products))):
+        target_products = random.sample(
+            products, k=min(config.optimization_product_count, len(products))
+        )
+        for product in target_products:
             action = random.choice(["restock", "transfer", "markdown"])
-            qty = (
-                random.randint(5, 50) if action != "markdown" else random.randint(1, 20)
+            quantity = (
+                random.randint(5, 30) if action != "markdown" else random.randint(1, 10)
             )
-            optimizations.append(
-                InventoryOptimization(
-                    branch_id=store.id,
-                    product_id=p.id,
-                    action=action,
-                    quantity=qty,
-                    priority=random.choice(["high", "medium", "low"]),
-                    reason=random.choice(
-                        [
-                            "High demand in last 7 days",
-                            "Low stock threshold reached",
-                            "Excess inventory detected",
-                            "Cross-branch balancing suggestion",
-                        ]
-                    ),
-                    status=random.choice(["pending", "applied", "ignored"]),
-                )
+            optimizations[(store.id, product.id, action)] = InventoryOptimization(
+                branch_id=store.id,
+                product_id=product.id,
+                action=action,
+                quantity=quantity,
+                priority=random.choice(["high", "medium", "low"]),
+                reason=random.choice(
+                    [
+                        "High demand in last 7 days",
+                        "Low stock threshold reached",
+                        "Excess inventory detected",
+                    ]
+                ),
+                status=random.choice(["pending", "applied", "ignored"]),
             )
-    unique_opts = {}
-    for row in optimizations:
-        unique_opts[(row.branch_id, row.product_id, row.action)] = row
 
-    db.add_all(list(unique_opts.values()))
+    db.add_all(list(optimizations.values()))
     db.flush()
 
 
 def truncate_all(db):
-    # Dùng cho SQLite/Postgres đơn giản khi seed lại
-    # Nếu bạn không muốn xoá dữ liệu cũ thì bỏ function này đi.
-    tables = [
-        TransactionItem,
-        Transaction,
-        Recommendation,
-        FaceEvent,
-        ProductAssociation,
-        BranchInventory,
-        PromotionProduct,
-        PromotionBranch,
-        Promotion,
-        CustomerConsent,
-        PrivacyAuditLog,
-        UserAccount,
-        CustomerStats,
-        Customer,
-        BranchMetrics,
-        ModelPerformanceLog,
-        InventoryOptimization,
-        ABExperimentEvent,
-        ABExperiment,
-        FederatedClientUpdate,
-        FederatedLearningRound,
-        ModelVersion,
-        EdgeDevice,
-        Product,
-        Store,
+    table_names = [
+        model.__tablename__
+        for model in (
+            TransactionItem,
+            Transaction,
+            Recommendation,
+            FaceEvent,
+            ProductAssociation,
+            CartAssociationRule,
+            AssociationRuleRaw,
+            BranchInventory,
+            PromotionProduct,
+            PromotionBranch,
+            Promotion,
+            CustomerConsent,
+            PrivacyAuditLog,
+            UserAccount,
+            CustomerStats,
+            Customer,
+            BranchMetrics,
+            ModelPerformanceLog,
+            InventoryOptimization,
+            ABExperimentEvent,
+            ABExperiment,
+            FederatedClientUpdate,
+            FederatedLearningRound,
+            ModelVersion,
+            EdgeDevice,
+            Product,
+            Store,
+        )
     ]
-    for model in tables:
-        db.query(model).delete()
+    quoted_tables = ", ".join(f'"{name}"' for name in table_names)
+    db.execute(text(f"TRUNCATE TABLE {quoted_tables} RESTART IDENTITY CASCADE"))
     db.commit()
 
 
@@ -794,17 +1014,37 @@ def main():
         truncate_all(db)
 
     stores, devices = seed_stores_and_devices(db)
-    products = seed_products_from_csv(db)
+    products = seed_products_from_csv(db, SEED_CONFIG)
     seed_branch_inventory(db, stores, products)
-    seed_product_associations(db, products)
-    customers = seed_customers(db, stores, count=60)
-    seed_promotions(db, stores, products)
-    seed_transactions_and_related(db, stores, devices, products, customers, count=180)
-    seed_modeling_tables(db, stores, products, devices, customers)
+    seed_product_associations(db, products, SEED_CONFIG)
+    customers = seed_customers(db, stores, SEED_CONFIG)
+
+    if SEED_CONFIG.include_promotions:
+        seed_promotions(db, stores, products, SEED_CONFIG)
+
+    seed_transactions_and_related(
+        db,
+        stores,
+        devices,
+        products,
+        customers,
+        SEED_CONFIG,
+    )
+
+    if SEED_CONFIG.include_modeling_tables:
+        seed_modeling_tables(
+            db,
+            stores,
+            products,
+            devices,
+            customers,
+            SEED_CONFIG,
+        )
 
     db.commit()
 
     print("Seed completed successfully.")
+    print(f"Profile: {SEED_CONFIG.profile}")
     print(f"Stores: {db.query(Store).count()}")
     print(f"Products: {db.query(Product).count()}")
     print(f"Customers: {db.query(Customer).count()}")

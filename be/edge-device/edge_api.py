@@ -1,9 +1,10 @@
 import io
 import logging
 import os
+import shutil
 import time
 from datetime import datetime, timezone
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -13,8 +14,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from starlette.responses import Response
 
 from config import get_settings
-from modules.model import FaceAttrPredictor
 from modules.mqtt_client import MQTTClient
+from modules.onnx_predictor import OnnxFaceAttrPredictor
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -30,7 +31,7 @@ BRANCH_ID = os.getenv("BRANCH_ID", settings.BRANCH_ID)
 DEVICE_ID = os.getenv("DEVICE_ID", settings.DEVICE_ID)
 heartbeat_stop = Event()
 heartbeat_thread: Thread | None = None
-mqtt_client = MQTTClient(BRANCH_ID)
+predictor_lock = Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,17 +43,89 @@ app.add_middleware(
 
 MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "models")
 MODEL_DIR = os.path.join(BASE_DIR, MODEL_STORAGE_PATH)
-MODEL_PATH = os.path.join(MODEL_DIR, "best_model.pth")
+
+
+def resolve_model_path() -> str:
+    configured_model = os.getenv("FACE_ATTR_MODEL_FILE", "best_model.onnx")
+    configured_path = os.path.join(MODEL_DIR, configured_model)
+    if os.path.exists(configured_path):
+        return configured_path
+
+    for file_name in ("best_model.onnx",):
+        candidate = os.path.join(MODEL_DIR, file_name)
+        if os.path.exists(candidate):
+            return candidate
+
+    if os.path.isdir(MODEL_DIR):
+        for file_name in sorted(os.listdir(MODEL_DIR)):
+            if file_name.lower().endswith(".onnx"):
+                return os.path.join(MODEL_DIR, file_name)
+
+    return configured_path
+
+
+MODEL_PATH = resolve_model_path()
 
 attr_predictor = None
-try:
-    attr_predictor = FaceAttrPredictor(
-        ckpt_path=MODEL_PATH,
-        backbone_name="resnet50_pretrained",
-        emo_classes=7,
-    )
-except Exception as exc:
-    logger.error("Face attribute model could not be loaded: %s", exc)
+
+
+def build_predictor(model_path: str) -> OnnxFaceAttrPredictor:
+    extension = os.path.splitext(model_path)[1].lower()
+    if extension != ".onnx":
+        raise ValueError(f"Unsupported edge model format: {extension or 'unknown'}")
+    return OnnxFaceAttrPredictor(model_path)
+
+
+def load_predictor(model_path: str = MODEL_PATH) -> OnnxFaceAttrPredictor | None:
+    try:
+        predictor = build_predictor(model_path)
+        logger.info("Loaded face attribute model from %s", model_path)
+        return predictor
+    except Exception as exc:
+        logger.error("Face attribute model could not be loaded: %s", exc)
+        return None
+
+
+def install_model(temp_model_path: str, metadata: Dict[str, Any] | None = None) -> None:
+    """Atomically replace the active model and reload the predictor in memory."""
+    global attr_predictor, MODEL_PATH
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    model_format = str((metadata or {}).get("model_format") or "").lower().lstrip(".")
+    if model_format and model_format != "onnx":
+        raise ValueError(f"Unsupported edge model format: {model_format}")
+
+    target_model_path = os.path.join(MODEL_DIR, "best_model.onnx")
+    backup_path = f"{target_model_path}.bak"
+    old_exists = os.path.exists(target_model_path)
+
+    if old_exists:
+        shutil.copy2(target_model_path, backup_path)
+
+    try:
+        shutil.move(temp_model_path, target_model_path)
+        new_predictor = build_predictor(target_model_path)
+        with predictor_lock:
+            attr_predictor = new_predictor
+            MODEL_PATH = target_model_path
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        logger.info("Installed model version %s", (metadata or {}).get("version"))
+    except Exception:
+        if os.path.exists(temp_model_path):
+            os.remove(temp_model_path)
+        if not old_exists and os.path.exists(target_model_path):
+            os.remove(target_model_path)
+        if old_exists and os.path.exists(backup_path):
+            shutil.move(backup_path, target_model_path)
+            with predictor_lock:
+                attr_predictor = load_predictor(target_model_path)
+                MODEL_PATH = target_model_path
+        raise
+
+
+attr_predictor = load_predictor(MODEL_PATH)
+mqtt_client = MQTTClient(BRANCH_ID, on_model_update=install_model)
 
 INFERENCE_COUNTER = Counter(
     "edge_api_face_analysis_total", "Total face analysis requests handled by edge API"
@@ -180,12 +253,15 @@ async def face_analysis(file: UploadFile = File(...)) -> Dict[str, Any]:
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid image file")
 
-        if attr_predictor is None:
+        with predictor_lock:
+            predictor = attr_predictor
+
+        if predictor is None:
             raise HTTPException(
                 status_code=500, detail="Face attribute model is not loaded"
             )
 
-        attributes = normalize_attributes(attr_predictor.predict(image))
+        attributes = normalize_attributes(predictor.predict(image))
 
         latency = time.time() - start
         INFERENCE_COUNTER.inc()

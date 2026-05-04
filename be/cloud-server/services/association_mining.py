@@ -6,7 +6,12 @@ from mlxtend.frequent_patterns import association_rules, fpgrowth
 from mlxtend.preprocessing import TransactionEncoder
 from sqlalchemy.orm import Session
 
-from database.models import ProductAssociation, TransactionItem
+from database.models import (
+    AssociationRuleRaw,
+    CartAssociationRule,
+    ProductAssociation,
+    TransactionItem,
+)
 
 
 def _get_transactions(db: Session, min_items: int) -> list[list[int]]:
@@ -30,6 +35,16 @@ def _get_transactions(db: Session, min_items: int) -> list[list[int]]:
     ]
 
 
+def _clear_association_tables(db: Session) -> None:
+    db.query(ProductAssociation).delete(synchronize_session=False)
+    db.query(CartAssociationRule).delete(synchronize_session=False)
+    db.query(AssociationRuleRaw).delete(synchronize_session=False)
+
+
+def _sorted_product_ids(value: Any) -> list[int]:
+    return sorted(int(product_id) for product_id in value)
+
+
 def regenerate_product_associations(
     db: Session,
     min_support: float = 0.001,
@@ -40,13 +55,17 @@ def regenerate_product_associations(
 ) -> dict[str, Any]:
     transactions = _get_transactions(db, min_items_per_transaction)
     if not transactions:
-        db.query(ProductAssociation).delete(synchronize_session=False)
+        _clear_association_tables(db)
         db.commit()
         return {
             "status": "success",
             "transactions_used": 0,
             "frequent_itemsets": 0,
             "rules_generated": 0,
+            "raw_rules_inserted": 0,
+            "cache_candidates": 0,
+            "one_to_one_rules": 0,
+            "cart_rules": 0,
             "rules_inserted": 0,
             "message": "No transactions with enough products were found.",
         }
@@ -62,13 +81,17 @@ def regenerate_product_associations(
     )
 
     if frequent_itemsets.empty:
-        db.query(ProductAssociation).delete(synchronize_session=False)
+        _clear_association_tables(db)
         db.commit()
         return {
             "status": "success",
             "transactions_used": len(transactions),
             "frequent_itemsets": 0,
             "rules_generated": 0,
+            "raw_rules_inserted": 0,
+            "cache_candidates": 0,
+            "one_to_one_rules": 0,
+            "cart_rules": 0,
             "rules_inserted": 0,
             "message": "No frequent itemsets matched the configured support.",
         }
@@ -80,54 +103,95 @@ def regenerate_product_associations(
     )
 
     if rules.empty:
-        db.query(ProductAssociation).delete(synchronize_session=False)
+        _clear_association_tables(db)
         db.commit()
         return {
             "status": "success",
             "transactions_used": len(transactions),
             "frequent_itemsets": int(len(frequent_itemsets)),
             "rules_generated": 0,
+            "raw_rules_inserted": 0,
+            "cache_candidates": 0,
+            "one_to_one_rules": 0,
+            "cart_rules": 0,
             "rules_inserted": 0,
             "message": "No association rules matched the configured confidence.",
         }
 
-    one_to_one_rules = rules[
-        (rules["antecedents"].apply(len) == 1)
-        & (rules["consequents"].apply(len) == 1)
-        & (rules["lift"] > min_lift)
-    ].copy()
-
-    one_to_one_rules = one_to_one_rules.sort_values(
+    ranked_rules = rules.sort_values(
         by=["lift", "confidence", "support"],
         ascending=False,
-    ).head(max_rules)
+    )
 
-    db.query(ProductAssociation).delete(synchronize_session=False)
+    _clear_association_tables(db)
 
-    inserted = 0
+    raw_inserted = 0
+    one_to_one_inserted = 0
+    cart_inserted = 0
     seen_pairs: set[tuple[int, int]] = set()
-    for _, rule in one_to_one_rules.iterrows():
-        product_id = int(next(iter(rule["antecedents"])))
-        related_product_id = int(next(iter(rule["consequents"])))
+    cache_candidates: list[tuple[AssociationRuleRaw, list[int], list[int]]] = []
 
-        if product_id == related_product_id:
+    for _, rule in ranked_rules.iterrows():
+        antecedents = _sorted_product_ids(rule["antecedents"])
+        consequents = _sorted_product_ids(rule["consequents"])
+
+        if not antecedents or not consequents:
+            continue
+        if set(antecedents) & set(consequents):
             continue
 
-        pair = (product_id, related_product_id)
-        if pair in seen_pairs:
-            continue
-        seen_pairs.add(pair)
-
-        db.add(
-            ProductAssociation(
-                product_id=product_id,
-                related_product_id=related_product_id,
-                confidence=float(rule["confidence"]),
-                lift=float(rule["lift"]),
-                support=float(rule["support"]),
-            )
+        raw_rule = AssociationRuleRaw(
+            antecedent_product_ids=antecedents,
+            consequent_product_ids=consequents,
+            antecedent_size=len(antecedents),
+            consequent_size=len(consequents),
+            confidence=float(rule["confidence"]),
+            lift=float(rule["lift"]),
+            support=float(rule["support"]),
+            algorithm="fp-growth",
+            is_active=True,
         )
-        inserted += 1
+        db.add(raw_rule)
+        db.flush()
+        raw_inserted += 1
+
+        if float(rule["lift"]) > min_lift:
+            cache_candidates.append((raw_rule, antecedents, consequents))
+
+    for raw_rule, antecedents, consequents in cache_candidates[:max_rules]:
+        if len(antecedents) == 1 and len(consequents) == 1:
+            product_id = antecedents[0]
+            related_product_id = consequents[0]
+            pair = (product_id, related_product_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+
+            db.add(
+                ProductAssociation(
+                    source_rule_id=raw_rule.id,
+                    product_id=product_id,
+                    related_product_id=related_product_id,
+                    confidence=raw_rule.confidence,
+                    lift=raw_rule.lift,
+                    support=raw_rule.support,
+                )
+            )
+            one_to_one_inserted += 1
+        else:
+            db.add(
+                CartAssociationRule(
+                    source_rule_id=raw_rule.id,
+                    antecedent_product_ids=antecedents,
+                    consequent_product_ids=consequents,
+                    antecedent_size=len(antecedents),
+                    consequent_size=len(consequents),
+                    confidence=raw_rule.confidence,
+                    lift=raw_rule.lift,
+                    support=raw_rule.support,
+                )
+            )
+            cart_inserted += 1
 
     db.commit()
 
@@ -136,8 +200,11 @@ def regenerate_product_associations(
         "transactions_used": len(transactions),
         "frequent_itemsets": int(len(frequent_itemsets)),
         "rules_generated": int(len(rules)),
-        "one_to_one_rules": int(len(one_to_one_rules)),
-        "rules_inserted": inserted,
+        "raw_rules_inserted": raw_inserted,
+        "cache_candidates": len(cache_candidates),
+        "one_to_one_rules": one_to_one_inserted,
+        "cart_rules": cart_inserted,
+        "rules_inserted": raw_inserted,
         "min_support": min_support,
         "min_confidence": min_confidence,
         "min_lift": min_lift,

@@ -12,20 +12,23 @@ import pickle
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+import cv2
+
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms, models
-from torch.utils.tensorboard import SummaryWriter
-
-from matplotlib import pyplot as plt
-from matplotlib.ticker import MaxNLocator, FuncFormatter
-
 from PIL import Image
-from tqdm import tqdm
 from datetime import datetime
 
 
+def _load_plotting():
+    from matplotlib import pyplot as plt
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+    return plt, MaxNLocator, FuncFormatter
+
+
+# --------------------
 class Logger(object):
     def __init__(self, filename="training.log"):
         self.terminal = sys.stdout
@@ -67,11 +70,13 @@ class Config:
     DATA_ROOT = "./data"  # Path to data
     TRAIN_LIST = "./data/train_new.txt"  # Training list file
     VAL_LIST = "./data/val.txt"  # Validation list file
-    OUTPUT_DIR = "./outputs"  # Output directory for the model
+    OUTPUT_DIR = "./outputs/resnet50"  # Output directory for the model
 
     # Model parameters
     BACKBONE = "resnet50"  # Backbone: resnet18, resnet34, resnet50, resnet101
-    USE_PRETRAINED = True
+    USE_PRETRAINED = (
+        False  # True only for the external ResNet staged fine-tuning branch
+    )
     EMBEDDING_SIZE = 512  # Embedding vector size
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -83,10 +88,6 @@ class Config:
     MOMENTUM = 0.9
     WEIGHT_DECAY = 1e-4
 
-    # ArcFace parameters
-    ARCFACE_S = 64  # Scale
-    ARCFACE_M = 0.5  # Margin
-
     # Image configuration
     IMG_SIZE = 224  # Input image size
 
@@ -94,6 +95,10 @@ class Config:
     EVAL_BATCH_SIZE = 128
     EVAL_FREQUENCY = 1  # Evaluation frequency (after how many epochs)
     EARLY_STOPPING_PATIENCE = 10  # Early stopping patience
+
+
+GENDER_NAMES = ["male", "female"]
+EMOTION_NAMES = ["anger", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 
 
 class EarlyStopping:
@@ -129,7 +134,7 @@ class EarlyStopping:
             self.bad_count += 1
             return self.bad_count >= self.patience
 
-        # warmup: never stop
+        # warmup
         if self.epoch <= self.warmup_epochs:
             self.best = (
                 value
@@ -166,14 +171,22 @@ class FaceAttrDataset(Dataset):
     def __init__(self, data_root, list_file, transform=None):
         self.data_root = data_root
         self.transform = transform
+        self.target_size = Config.IMG_SIZE
         self.items = []
+
         with open(list_file, "r", encoding="utf-8") as f:
-            lines2 = f.readlines()
-            for raw in lines2[1:]:
+            for i, raw in enumerate(f):
+                if i == 0:
+                    continue
                 raw = raw.strip()
                 if not raw or raw.startswith("#"):
                     continue
-                p, age, gender, emo = raw.split()
+
+                parts = raw.split()
+                if len(parts) != 4:
+                    raise ValueError(f"Invalid line in {list_file}: {raw}")
+
+                p, age, gender, emo = parts
                 self.items.append((p, float(age), int(gender), int(emo)))
 
     def __len__(self):
@@ -181,9 +194,24 @@ class FaceAttrDataset(Dataset):
 
     def __getitem__(self, idx):
         rel, age, gender, emo = self.items[idx]
-        img = Image.open(os.path.join(self.data_root, rel)).convert("RGB")
-        if self.transform:
+        img_path = os.path.join(self.data_root, rel)
+
+        img_bgr = cv2.imread(img_path)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Cannot read image: {img_path}")
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(img_rgb)
+
+        if self.transform is not None:
             img = self.transform(img)
+
+        # Default DataLoader collation can fail on tensors backed by
+        # non-resizable storage from image transforms. Return a regular
+        # contiguous clone so worker collation is stable.
+        if isinstance(img, torch.Tensor):
+            img = img.contiguous().clone()
+
         return (
             img,
             torch.tensor(age, dtype=torch.float32),
@@ -192,17 +220,13 @@ class FaceAttrDataset(Dataset):
         )
 
 
-def to_rgb(img):
-    return img.convert("RGB")
-
-
 def get_train_transform():
     return transforms.Compose(
         [
             transforms.Resize((Config.IMG_SIZE, Config.IMG_SIZE)),
-            transforms.RandomRotation(30),
+            transforms.RandomRotation(15),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.Lambda(to_rgb),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -213,7 +237,6 @@ def get_val_transform():
     return transforms.Compose(
         [
             transforms.Resize((Config.IMG_SIZE, Config.IMG_SIZE)),
-            transforms.Lambda(lambda img: img.convert("RGB")),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ]
@@ -221,7 +244,7 @@ def get_val_transform():
 
 
 # --------------------
-# PHẦN 2: MÔ HÌNH
+# PART 2: MODEL
 # --------------------
 
 
@@ -290,7 +313,7 @@ def numpy_to_torch(state_dict, device="cpu"):
 
 class FaceBackbone(nn.Module):
     """
-    Backbone cho mô hình nhận dạng khuôn mặt, dựa trên ResNet với các khối IR
+    Face attribute backbone based on torchvision ResNet variants.
     """
 
     def __init__(
@@ -298,18 +321,18 @@ class FaceBackbone(nn.Module):
     ):
         super(FaceBackbone, self).__init__()
 
-        # Lấy mô hình backbone từ torchvision
+        # Load the backbone model from torchvision
         if backbone_name == "resnet18":
-            self.backbone = models.resnet18(weights="DEFAULT")
+            self.backbone = models.resnet18(weights=None)
             feature_dim = 512
         elif backbone_name == "resnet34":
-            self.backbone = models.resnet34(weights="DEFAULT")
+            self.backbone = models.resnet34(weights=None)
             feature_dim = 512
         elif backbone_name == "resnet50":
-            self.backbone = models.resnet50(weights="DEFAULT")
+            self.backbone = models.resnet50(weights=None)
             feature_dim = 2048
         elif backbone_name == "resnet101":
-            self.backbone = models.resnet101(weights="DEFAULT")
+            self.backbone = models.resnet101(weights=None)
             feature_dim = 2048
         elif backbone_name == "resnet50_pretrained":
             self.backbone = models.resnet50(weights=None)
@@ -328,7 +351,7 @@ class FaceBackbone(nn.Module):
                     else ckpt
                 )
 
-                # strip prefix hay gặp
+                # strip common prefix
                 def strip_prefix(sd, prefix):
                     return {
                         (k[len(prefix) :] if k.startswith(prefix) else k): v
@@ -353,7 +376,7 @@ class FaceBackbone(nn.Module):
             else:
                 print("[INFO] No external pretrained backbone loaded.")
         else:
-            raise ValueError(f"Backbone {backbone_name} không được hỗ trợ")
+            raise ValueError(f"Backbone {backbone_name} is not supported")
 
         resnet = self.backbone  # torchvision resnet
 
@@ -386,62 +409,6 @@ class FaceBackbone(nn.Module):
         return x
 
 
-class ArcFaceLayer(nn.Module):
-    """
-    Lớp ArcFace để tính toán hàm mất mát dựa trên góc
-    """
-
-    def __init__(self, in_features, out_features, s=30.0, m=0.5):
-        super(ArcFaceLayer, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.s = s  # Scale
-        self.m = m  # Margin
-
-        # Weight initialization for each layer
-        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        nn.init.xavier_uniform_(self.weight)
-
-        # Calculate minimal angle using algebra
-        self.cos_m = math.cos(m)
-        self.sin_m = math.sin(m)
-        self.th = math.cos(math.pi - m)
-        self.mm = math.sin(math.pi - m) * m
-
-    def forward(self, input, label):
-        # Normalize weights (each row is a normalized feature vector)
-        x = F.normalize(input, p=2, dim=1)
-        weight = F.normalize(self.weight, p=2, dim=1)
-
-        # Calculate cosine similarity between input and weights
-        cosine = F.linear(x, weight)
-        # Clamp to avoid numerical errors when sqrt
-        cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
-
-        # Limit range to avoid numerical errors
-        sine = torch.sqrt(torch.clamp(1.0 - cosine * cosine, min=0.0))
-
-        # Formula for angle phi + m where phi is the angle between feature and weight
-        phi = cosine * self.cos_m - sine * self.sin_m
-
-        # Condition: cosθ > cosθ_th to ensure monotonicity
-        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
-
-        # Convert labels to one-hot encoding
-        one_hot = torch.zeros_like(cosine)
-        valid_mask = label >= 0
-        if valid_mask.any():
-            one_hot.scatter_(1, label.view(-1, 1).long(), 1)
-
-        # Apply margin to correct classes, keep unchanged for incorrect classes
-        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
-
-        # Apply scaling factor
-        output = output * self.s
-
-        return output
-
-
 class FaceAttrModel(nn.Module):
     def __init__(self, backbone_name="resnet50", pretrained=None, emo_classes=7):
         super().__init__()
@@ -455,9 +422,9 @@ class FaceAttrModel(nn.Module):
             nn.Linear(feature_dim, 512), nn.BatchNorm1d(512), nn.ReLU(inplace=True)
         )
 
-        # Age regression (B,)  -> dự đoán tuổi dạng số
+        # Age regression (B,) -> predicts numeric age
         self.age_head = nn.Sequential(
-            nn.Linear(feature_dim, 256),
+            nn.Linear(512, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
             nn.Linear(256, 1),
@@ -465,44 +432,23 @@ class FaceAttrModel(nn.Module):
         )
 
         # Gender classification (B,2)
-        self.gender_head = ArcFaceLayer(
-            in_features=512, out_features=2, s=Config.ARCFACE_S, m=Config.ARCFACE_M
-        )
+        self.gender_head = nn.Linear(512, 2)
 
         # Emotion classification (B,K)
-        self.emo_head = ArcFaceLayer(
-            in_features=512,
-            out_features=emo_classes,
-            s=Config.ARCFACE_S,
-            m=Config.ARCFACE_M,
-        )
+        self.emo_head = nn.Linear(512, emo_classes)
 
         self.log_vars = nn.Parameter(torch.zeros(3))
 
-    def forward(self, x, labels=None):
+    def forward(self, x):
         pooled = self.backbone(x)  # (B, feature_dim)
         feat = self.bottleneck(pooled)
 
         age = self.age_head(feat).squeeze(1) * 100  # (B,)
-
-        if self.training and labels is not None:
-            # Khi TRAIN: Sử dụng ArcFace với Margin
-            gender_logits = self.gender_head(feat, labels["gender"])
-            emotion_logits = self.emo_head(feat, labels["emotion"])
-        else:
-            # Khi EVAL: Tính Cosine Similarity thuần túy (không margin)
-            # Giúp đánh giá chính xác khả năng phân tách của embedding
-            def get_logits(feat, weight, s):
-                feat_norm = F.normalize(feat, p=2, dim=1)
-                weight_norm = F.normalize(weight, p=2, dim=1)
-                return F.linear(feat_norm, weight_norm) * s
-
-            gender_logits = get_logits(
-                feat, self.gender_head.weight, self.gender_head.s
-            )
-            emotion_logits = get_logits(feat, self.emo_head.weight, self.emo_head.s)
+        gender_logits = self.gender_head(feat)  # (B,2)
+        emotion_logits = self.emo_head(feat)  # (B,K)
 
         return {
+            "feat": feat,
             "age": age,
             "gender": gender_logits,
             "emotion": emotion_logits,
@@ -511,7 +457,7 @@ class FaceAttrModel(nn.Module):
 
 
 # --------------------
-# PHẦN 3: HUẤN LUYỆN
+# PART 3: TRAINING
 # --------------------
 
 # Fixed weights
@@ -676,19 +622,17 @@ def train_one_epoch_attr(model, loader, optimizer, device):
         gender = gender.to(device, non_blocking=True)
         emo = emo.to(device, non_blocking=True)
 
-        labels_dict = {"gender": gender.to(device), "emotion": emo.to(device)}
-
-        out = model(imgs, labels=labels_dict)
+        out = model(imgs)
         log_vars = out["log_vars"]
 
-        # --- TÍNH TOÁN LOSS RIÊNG BIỆT ---
+        # --- LOSS SEPARATE CALCULATION ---
 
         # 1. Age Loss
         m_age = age != -1
         if m_age.any():
-            # Chỉ lấy loss của những ảnh có nhãn tuổi
+            # Only extract the lossy images that have age tags
             loss_age_raw = age_loss_fn(out["age"][m_age].squeeze(), age[m_age])
-            # Áp dụng trọng số tự học cho Age
+            # Apply dynamic weighting formula: Loss = (1/exp(log_var)) * raw_loss + log_var
             loss_age_weighted = torch.exp(-log_vars[0]) * loss_age_raw + log_vars[0]
 
             # Update metrics
@@ -725,8 +669,8 @@ def train_one_epoch_attr(model, loader, optimizer, device):
         else:
             loss_emo_weighted = torch.tensor(0.0, device=device)
 
-        # --- TỔNG LOSS ---
-        # Chỉ những task nào có dữ liệu trong batch mới đóng góp vào loss và gradient
+        # --- TOTAL LOSS ---
+        # Only tasks that have batch data contribute to loss and gradient
         loss = loss_age_weighted + loss_gender_weighted + loss_emo_weighted
 
         optimizer.zero_grad(set_to_none=True)
@@ -747,7 +691,7 @@ def train_one_epoch_attr(model, loader, optimizer, device):
 
 
 @torch.no_grad()
-def eval_one_epoch_attr(model, dataloader, device):
+def eval_one_epoch_attr(model, dataloader, device, collect_predictions=False):
     model.eval()
 
     age_loss_fn = nn.SmoothL1Loss(beta=1.0)
@@ -757,10 +701,17 @@ def eval_one_epoch_attr(model, dataloader, device):
     total_loss_sum = 0.0
     total_samples = 0
 
-    # metrics accumulators (masked)
     age_mae_sum, age_cnt = 0.0, 0
     gender_ok, gender_cnt = 0, 0
     emo_ok, emo_cnt = 0, 0
+    pred_store = {
+        "age_true": [],
+        "age_pred": [],
+        "gender_true": [],
+        "gender_pred": [],
+        "emotion_true": [],
+        "emotion_pred": [],
+    }
 
     for inputs, age, gender, emo in dataloader:
         inputs = inputs.to(device, non_blocking=True)
@@ -769,60 +720,74 @@ def eval_one_epoch_attr(model, dataloader, device):
         emo = emo.to(device, non_blocking=True)
 
         out = model(inputs)
-        # Lấy log_vars từ output của model
         log_vars = out["log_vars"]
 
-        # 1. Tính Raw Losses (giống hệt hàm train)
-        loss_age_raw = torch.tensor(0.0, device=device)
+        combined_loss = torch.tensor(0.0, device=device)
+
         m_age = age != -1
         if m_age.any():
             loss_age_raw = age_loss_fn(out["age"][m_age], age[m_age])
+            combined_loss += torch.exp(-log_vars[0]) * loss_age_raw + log_vars[0]
+
             age_mae_sum += (out["age"][m_age] - age[m_age]).abs().sum().item()
             age_cnt += int(m_age.sum().item())
+            if collect_predictions:
+                pred_store["age_true"].append(age[m_age].detach().cpu().numpy())
+                pred_store["age_pred"].append(out["age"][m_age].detach().cpu().numpy())
 
-        loss_gender_raw = torch.tensor(0.0, device=device)
         m_gender = gender != -1
         if m_gender.any():
             loss_gender_raw = gender_loss_fn(out["gender"][m_gender], gender[m_gender])
+            combined_loss += torch.exp(-log_vars[1]) * loss_gender_raw + log_vars[1]
+
             pred_g = out["gender"][m_gender].argmax(dim=1)
             gender_ok += (pred_g == gender[m_gender]).sum().item()
             gender_cnt += int(m_gender.sum().item())
+            if collect_predictions:
+                pred_store["gender_true"].append(
+                    gender[m_gender].detach().cpu().numpy()
+                )
+                pred_store["gender_pred"].append(pred_g.detach().cpu().numpy())
 
-        loss_emo_raw = torch.tensor(0.0, device=device)
         m_emo = emo != -1
         if m_emo.any():
             loss_emo_raw = emo_loss_fn(out["emotion"][m_emo], emo[m_emo])
+            combined_loss += torch.exp(-log_vars[2]) * loss_emo_raw + log_vars[2]
+
             pred_e = out["emotion"][m_emo].argmax(dim=1)
             emo_ok += (pred_e == emo[m_emo]).sum().item()
             emo_cnt += int(m_emo.sum().item())
-
-        # 2. Áp dụng công thức Dynamic Weighting để tính Loss tổng hợp cho Validation
-        # Công thức: Loss = (1/exp(log_var)) * raw_loss + log_var
-        combined_loss = (
-            (torch.exp(-log_vars[0]) * loss_age_raw + log_vars[0])
-            + (torch.exp(-log_vars[1]) * loss_gender_raw + log_vars[1])
-            + (torch.exp(-log_vars[2]) * loss_emo_raw + log_vars[2])
-        )
+            if collect_predictions:
+                pred_store["emotion_true"].append(emo[m_emo].detach().cpu().numpy())
+                pred_store["emotion_pred"].append(pred_e.detach().cpu().numpy())
 
         bs = inputs.size(0)
         total_loss_sum += float(combined_loss.item()) * bs
         total_samples += bs
 
-    return {
+    metrics = {
         "loss": total_loss_sum / max(total_samples, 1),
         "age_mae": (age_mae_sum / age_cnt) if age_cnt > 0 else None,
         "gender_acc": (100.0 * gender_ok / gender_cnt) if gender_cnt > 0 else None,
         "emo_acc": (100.0 * emo_ok / emo_cnt) if emo_cnt > 0 else None,
         "counts": {"age": age_cnt, "gender": gender_cnt, "emotion": emo_cnt},
     }
+    if collect_predictions:
+        metrics["predictions"] = {
+            key: np.concatenate(parts) if parts else np.array([])
+            for key, parts in pred_store.items()
+        }
+    return metrics
 
 
 # --------------------
-# PHẦN 4: HÀM CHÍNH
+# PART 4: MAIN FUNCTION
 # --------------------
 
 
 def main():
+    from torch.utils.tensorboard import SummaryWriter
+
     # Create output directory
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
     sys.stdout = Logger(os.path.join(Config.OUTPUT_DIR, "training.log"))
@@ -839,7 +804,9 @@ def main():
 
     # Create datasets
     train_dataset = FaceAttrDataset(
-        Config.DATA_ROOT, Config.TRAIN_LIST, transform=train_transform
+        Config.DATA_ROOT,
+        Config.TRAIN_LIST,
+        transform=train_transform,
     )
     val_dataset = FaceAttrDataset(
         Config.DATA_ROOT,
@@ -881,11 +848,12 @@ def main():
 
         # Optimization - This is used for unpretrained training
 
-        STAGE_1_EPOCHS = 5  # Freeze all backbone
-        STAGE_2_EPOCHS = 25  # Unfreeze layer4
-        TOTAL_EPOCHS = STAGE_1_EPOCHS + STAGE_2_EPOCHS  # = 30
+        STAGE_1_EPOCHS = 10  # Freeze all backbone
+        STAGE_2_EPOCHS = 15  # Unfreeze layer4
+        STAGE_3_EPOCHS = 20  # Unfreeze layer3
+        TOTAL_EPOCHS = STAGE_1_EPOCHS + STAGE_2_EPOCHS + STAGE_3_EPOCHS
 
-        # Override Config.NUM_EPOCHS nếu cần
+        # Override Config.NUM_EPOCHS if needed
         Config.NUM_EPOCHS = TOTAL_EPOCHS
 
         # Optimizer & Scheduler
@@ -898,13 +866,13 @@ def main():
                 "params": model.backbone.backbone.layer4.parameters(),
                 "lr": 0,
                 "name": "layer4",
-            },  # Stage 1 để lr=0
+            },  # Stage 1 keeps lr=0
         ]
 
         optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-4)
 
-        # Sử dụng duy nhất 1 scheduler cho toàn bộ quá trình 30 epochs
-        # T_max = Config.NUM_EPOCHS để LR giảm dần đều tới cuối
+        # Use a single scheduler for the whole 30-epoch run
+        # T_max = Config.NUM_EPOCHS so LR decays smoothly until the end
         scheduler = CosineAnnealingLR(optimizer, T_max=Config.NUM_EPOCHS, eta_min=1e-6)
 
         print(f"\n{'='*60}")
@@ -912,6 +880,9 @@ def main():
         print(f"  Stage 1 (Epochs 1-{STAGE_1_EPOCHS}): Freeze all backbone")
         print(
             f"  Stage 2 (Epochs {STAGE_1_EPOCHS+1}-{STAGE_1_EPOCHS+STAGE_2_EPOCHS}): Unfreeze layer4 only"
+        )
+        print(
+            f"  Stage 3 (Epochs {STAGE_1_EPOCHS+STAGE_2_EPOCHS+1}-{TOTAL_EPOCHS}): Unfreeze layer3 and layer4"
         )
         print(f"{'='*60}\n")
     else:
@@ -922,9 +893,11 @@ def main():
         optimizer = torch.optim.AdamW(
             [
                 {"params": model.backbone.parameters(), "lr": 1e-5},
-                {"params": model.embedding.parameters(), "lr": 1e-4},
-                {"params": model.bn.parameters(), "lr": 1e-4},
-                {"params": model.arcface.parameters(), "lr": 1e-4},
+                {"params": model.bottleneck.parameters(), "lr": 1e-4},
+                {"params": model.age_head.parameters(), "lr": 1e-4},
+                {"params": model.gender_head.parameters(), "lr": 1e-4},
+                {"params": model.emo_head.parameters(), "lr": 1e-4},
+                {"params": [model.log_vars], "lr": 1e-3},
             ],
             weight_decay=1e-4,
             betas=(0.9, 0.999),
@@ -944,6 +917,9 @@ def main():
         "epoch": [],
         "train_loss": [],
         "val_loss": [],
+        "train_age_mae": [],
+        "train_gender_acc": [],
+        "train_emo_acc": [],
         "val_age_mae": [],
         "val_gender_acc": [],
         "val_emo_acc": [],
@@ -965,52 +941,50 @@ def main():
             elif epoch == STAGE_1_EPOCHS:
                 print(f"\n{'='*60}")
                 print(
-                    f"STAGE 2: Unfreezing layer4 (Epochs {STAGE_1_EPOCHS+1}-{TOTAL_EPOCHS})"
+                    f"STAGE 2: Unfreezing layer4 (Epochs {STAGE_1_EPOCHS+1}-{STAGE_1_EPOCHS+STAGE_2_EPOCHS})"
                 )
                 print(f"{'='*60}\n")
 
-                # 1. Cho phép tính gradient cho layer4
+                # 1. Enable gradients for layer4
                 for p in model.backbone.backbone.layer4.parameters():
                     p.requires_grad = True
 
-                # 2. Cập nhật LR trực tiếp cho các nhóm
+                # 2. Update LR directly for the optimizer groups
                 for pg in optimizer.param_groups:
                     if pg.get("name") == "layer4":
-                        pg["lr"] = 1e-5  # Bắt đầu cho backbone học rất chậm
+                        pg["lr"] = 1e-5  # Start backbone learning very slowly
                     elif pg.get("name") == "heads":
                         pg["lr"] = 1e-4
 
-        # ========== STAGE 3: Unfreeze layer3 ==========
-        # elif epoch == STAGE_1_EPOCHS + STAGE_2_EPOCHS:
-        #     print(f"\n{'='*60}")
-        #     print(
-        #         f"STAGE 3: Unfreezing layer3 (Epochs {STAGE_1_EPOCHS+STAGE_2_EPOCHS+1}-{STAGE_1_EPOCHS+STAGE_2_EPOCHS+STAGE_3_EPOCHS})"
-        #     )
-        #     print(f"{'='*60}\n")
+            # ========== STAGE 3: Unfreeze layer3 ==========
+            elif epoch == STAGE_1_EPOCHS + STAGE_2_EPOCHS:
+                print(f"\n{'='*60}")
+                print(
+                    f"STAGE 3: Unfreezing layer3 (Epochs {STAGE_1_EPOCHS+STAGE_2_EPOCHS+1}-{STAGE_1_EPOCHS+STAGE_2_EPOCHS+STAGE_3_EPOCHS})"
+                )
+                print(f"{'='*60}\n")
 
-        #     freeze_layers(model, freeze_until="layer2")
-        #     freeze_bn(model.backbone.backbone)
-        #     layer3_block = model.backbone.backbone.layer3
-        #     layer4_block = model.backbone.backbone.layer4
+                freeze_layers(model, freeze_until="layer2")
+                freeze_bn(model.backbone.backbone)
+                layer3_block = model.backbone.backbone.layer3
+                layer4_block = model.backbone.backbone.layer4
 
-        #     optimizer = torch.optim.AdamW(
-        #         [
-        #             {
-        #                 "params": layer3_block.parameters(),
-        #                 "lr": 2e-5,
-        #             },
-        #             {
-        #                 "params": layer4_block.parameters(),
-        #                 "lr": 3e-5,
-        #             },
-        #             {"params": model.embedding.parameters(), "lr": 3e-4},
-        #             {"params": model.bn.parameters(), "lr": 3e-4},
-        #             {"params": model.arcface.parameters(), "lr": 3e-4},
-        #         ],
-        #         weight_decay=5e-4,
-        #         betas=(0.9, 0.999),
-        #     )
-        #     scheduler = CosineAnnealingLR(optimizer, T_max=STAGE_3_EPOCHS, eta_min=1e-5)
+                optimizer = torch.optim.AdamW(
+                    [
+                        {"params": layer3_block.parameters(), "lr": 2e-5},
+                        {"params": layer4_block.parameters(), "lr": 3e-5},
+                        {"params": model.bottleneck.parameters(), "lr": 1e-4},
+                        {"params": model.age_head.parameters(), "lr": 1e-4},
+                        {"params": model.gender_head.parameters(), "lr": 1e-4},
+                        {"params": model.emo_head.parameters(), "lr": 1e-4},
+                        {"params": [model.log_vars], "lr": 1e-3},
+                    ],
+                    weight_decay=1e-4,
+                    betas=(0.9, 0.999),
+                )
+                scheduler = CosineAnnealingLR(
+                    optimizer, T_max=STAGE_3_EPOCHS, eta_min=1e-5
+                )
 
         # ========== Train one epoch ==========
         train_metrics = train_one_epoch_attr(
@@ -1027,6 +1001,9 @@ def main():
         # Save metrics to history
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
+        history["train_age_mae"].append(train_metrics["age_mae"])
+        history["train_gender_acc"].append(train_metrics["gender_acc"])
+        history["train_emo_acc"].append(train_metrics["emo_acc"])
         history["val_age_mae"].append(val_metrics["age_mae"])
         history["val_gender_acc"].append(val_metrics["gender_acc"])
         history["val_emo_acc"].append(val_metrics["emo_acc"])
@@ -1088,7 +1065,9 @@ def main():
         score = val_metrics["loss"]
         if score < best_score:
             best_score = score
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(
+                model.state_dict(), os.path.join(Config.OUTPUT_DIR, "best_model.pth")
+            )
             print(f"[BEST MODEL] Saved best_model.pth at epoch {epoch+1}")
         # Early stopping check
         if early_stop.step(score):
@@ -1101,7 +1080,7 @@ def main():
         history,
         "val_emo_acc",
         os.path.join(Config.OUTPUT_DIR, "fig2_val_emo_acc.png"),
-        title="Validation Curve — Emotion Accuracy",
+        title="Validation Curve - Emotion Accuracy",
         ylabel="Accuracy (%)",
         is_percent=True,
     )
@@ -1110,7 +1089,7 @@ def main():
         history,
         "val_gender_acc",
         os.path.join(Config.OUTPUT_DIR, "fig3_val_gender_acc.png"),
-        title="Validation Curve — Gender Accuracy",
+        title="Validation Curve - Gender Accuracy",
         ylabel="Accuracy (%)",
         is_percent=True,
     )
@@ -1119,39 +1098,73 @@ def main():
         history,
         "val_age_mae",
         os.path.join(Config.OUTPUT_DIR, "fig4_val_age_mae.png"),
-        title="Validation Curve — Age MAE",
+        title="Validation Curve - Age MAE",
         ylabel="MAE (years)",
         is_percent=False,
     )
-
-    print(
-        "[PLOT] Saved fig1_loss_curve.png, fig2_val_emo_acc.png, fig3_val_gender_acc.png, fig4_val_age_mae.png"
+    plot_train_val_metric_curve(
+        history,
+        "train_age_mae",
+        "val_age_mae",
+        os.path.join(Config.OUTPUT_DIR, "fig5_train_val_age_mae.png"),
+        title="Training vs Validation - Age MAE",
+        ylabel="MAE (years)",
+        is_percent=False,
     )
+    plot_train_val_metric_curve(
+        history,
+        "train_gender_acc",
+        "val_gender_acc",
+        os.path.join(Config.OUTPUT_DIR, "fig6_train_val_gender_acc.png"),
+        title="Training vs Validation - Gender Accuracy",
+        ylabel="Accuracy (%)",
+        is_percent=True,
+    )
+    plot_train_val_metric_curve(
+        history,
+        "train_emo_acc",
+        "val_emo_acc",
+        os.path.join(Config.OUTPUT_DIR, "fig7_train_val_emotion_acc.png"),
+        title="Training vs Validation - Emotion Accuracy",
+        ylabel="Accuracy (%)",
+        is_percent=True,
+    )
+
+    print("[PLOT] Saved training curves fig1-fig7")
 
     # Close TensorBoard writer
     writer.close()
 
     print("Training completed!")
 
-    # --- THÊM VÀO SAU KHI KẾT THÚC VÒNG LẶP TRAIN ---
-    print("\n" + "=" * 20 + " HỆ SỐ TỐI ƯU ĐÃ HỌC ĐƯỢC " + "=" * 20)
-    state_dict = torch.load("best_model.pth", weights_only=True)
+    # --- RUN AFTER THE TRAINING LOOP FINISHES ---
+    print("\n" + "=" * 20 + " LEARNED OPTIMAL WEIGHTS " + "=" * 20)
+    state_dict = torch.load(
+        os.path.join(Config.OUTPUT_DIR, "best_model.pth"), weights_only=True
+    )
     model.load_state_dict(state_dict)
     model.eval()
+    final_val_metrics = eval_one_epoch_attr(
+        model, val_loader, Config.DEVICE, collect_predictions=True
+    )
+    plot_final_evaluation(
+        final_val_metrics,
+        Config.OUTPUT_DIR,
+        gender_names=GENDER_NAMES,
+        emotion_names=EMOTION_NAMES,
+    )
 
     with torch.no_grad():
         log_vars = model.log_vars.cpu().numpy()
-        # Tính toán trọng số thực tế từ log_vars
+        # Compute actual weights from log_vars
         raw_weights = np.exp(-log_vars)
-        # Chuẩn hóa để tổng bằng 3 (giúp dễ so sánh với mức mặc định 1.0)
+        # Normalize to sum to 3, which makes comparison with the 1.0 default easier
         norm_w = raw_weights * (3.0 / np.sum(raw_weights))
 
-        print(f"Trọng số Age Head    : {norm_w[0]:.4f}")
-        print(f"Trọng số Gender Head : {norm_w[1]:.4f}")
-        print(f"Trọng số Emotion Head: {norm_w[2]:.4f}")
+        print(f"Age head weight    : {norm_w[0]:.4f}")
+        print(f"Gender head weight : {norm_w[1]:.4f}")
+        print(f"Emotion head weight: {norm_w[2]:.4f}")
     print("=" * 60)
-
-    # Tiếp tục các phần Export ONNX phía dưới...
 
     # Export model to ONNX
     best_pth = os.path.join(Config.OUTPUT_DIR, "best_model.pth")
@@ -1161,7 +1174,8 @@ def main():
         pth_path=best_pth,
         onnx_path=onnx_path,
         img_size=Config.IMG_SIZE,
-        backbone_name="resnet50_pretrained",  # phải khớp lúc train
+        # backbone_name="resnet50_pretrained",
+        backbone_name="resnet50",
         emo_classes=7,
         device="cpu",
     )
@@ -1169,7 +1183,7 @@ def main():
 
 
 # --------------------
-# PHẦN 5: VẼ ĐỒ THỊ
+# PART 5: PLOTTING
 # --------------------
 
 
@@ -1182,8 +1196,8 @@ def _apply_common_style(ax):
 
 def _draw_stage_lines(ax, stage_boundaries=None, stage_labels=None):
     """
-    stage_boundaries: list các mốc epoch (số nguyên, 1-based) tại đó stage đổi.
-    Ví dụ: [STAGE_1_EPOCHS, STAGE_1_EPOCHS + STAGE_2_EPOCHS]
+    stage_boundaries: list of 1-based epoch indices where training stages change.
+    Example: [STAGE_1_EPOCHS, STAGE_1_EPOCHS + STAGE_2_EPOCHS]
     """
     if not stage_boundaries:
         return
@@ -1202,6 +1216,8 @@ def _draw_stage_lines(ax, stage_boundaries=None, stage_labels=None):
 
 
 def plot_loss_curve(history, out_path, stage_boundaries=None, stage_labels=None):
+    plt, MaxNLocator, _ = _load_plotting()
+
     epoch = np.array(history["epoch"], dtype=int)
     train_loss = np.array(history["train_loss"], dtype=float)
 
@@ -1233,12 +1249,12 @@ def plot_loss_curve(history, out_path, stage_boundaries=None, stage_labels=None)
     else:
         y_all = train_loss
 
-    ax.set_title("Training Curve — Loss", fontsize=15, pad=10)
+    ax.set_title("Training Curve - Loss", fontsize=15, pad=10)
     ax.set_xlabel("Epoch", fontsize=12)
     ax.set_ylabel("Loss", fontsize=12)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    # y-limits có padding nhẹ
+    # y-limits with light padding
     y_min, y_max = float(np.nanmin(y_all)), float(np.nanmax(y_all))
     pad = 0.08 * (y_max - y_min + 1e-12)
     ax.set_ylim(y_min - pad, y_max + pad)
@@ -1251,10 +1267,12 @@ def plot_loss_curve(history, out_path, stage_boundaries=None, stage_labels=None)
 
 
 def plot_metric_curve(history, key, out_path, title, ylabel, is_percent=False):
+    plt, MaxNLocator, FuncFormatter = _load_plotting()
+
     epoch = np.array(history["epoch"], dtype=int)
     vals = history.get(key, [])
 
-    # lọc None
+    # filter None values
     xs, ys = [], []
     for e, v in zip(epoch, vals):
         if v is None:
@@ -1289,8 +1307,295 @@ def plot_metric_curve(history, key, out_path, title, ylabel, is_percent=False):
     plt.close()
 
 
+def plot_train_val_metric_curve(
+    history,
+    train_key,
+    val_key,
+    out_path,
+    title,
+    ylabel,
+    is_percent=False,
+):
+    plt, MaxNLocator, FuncFormatter = _load_plotting()
+
+    epoch = np.array(history["epoch"], dtype=int)
+
+    def _valid_xy(key):
+        xs, ys = [], []
+        for e, v in zip(epoch, history.get(key, [])):
+            if v is not None:
+                xs.append(e)
+                ys.append(float(v))
+        return np.array(xs, dtype=int), np.array(ys, dtype=float)
+
+    train_x, train_y = _valid_xy(train_key)
+    val_x, val_y = _valid_xy(val_key)
+    if len(train_x) == 0 and len(val_x) == 0:
+        print(f"[PLOT] Skip {train_key}/{val_key}: all values are None")
+        return
+
+    plt.figure(figsize=(11, 4.6))
+    ax = plt.gca()
+    _apply_common_style(ax)
+
+    if len(train_x) > 0:
+        ax.plot(
+            train_x,
+            train_y,
+            linewidth=2.6,
+            marker="o",
+            markersize=4.2,
+            label="Train",
+        )
+    if len(val_x) > 0:
+        ax.plot(
+            val_x,
+            val_y,
+            linewidth=2.6,
+            linestyle="--",
+            marker="s",
+            markersize=4.2,
+            label="Validation",
+        )
+
+    ax.set_title(title, fontsize=15, pad=10)
+    ax.set_xlabel("Epoch", fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    if is_percent:
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0f}%"))
+        values = np.concatenate([arr for arr in [train_y, val_y] if len(arr) > 0])
+        ax.set_ylim(max(0.0, values.min() - 2), min(100.0, values.max() + 2))
+    ax.legend(loc="best", frameon=True, framealpha=0.85, fontsize=11)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def _confusion_matrix_np(y_true, y_pred, num_classes):
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+    for t, p in zip(y_true.astype(int), y_pred.astype(int)):
+        if 0 <= t < num_classes and 0 <= p < num_classes:
+            cm[t, p] += 1
+    return cm
+
+
+def plot_confusion_matrix(cm, labels, out_path, title, normalize=False):
+    plt, _, _ = _load_plotting()
+
+    display = cm.astype(float)
+    if normalize:
+        row_sum = display.sum(axis=1, keepdims=True)
+        display = np.divide(
+            display, row_sum, out=np.zeros_like(display), where=row_sum > 0
+        )
+
+    plt.figure(figsize=(8.2, 6.8))
+    ax = plt.gca()
+    im = ax.imshow(display, interpolation="nearest", cmap="Blues")
+    plt.colorbar(im, fraction=0.046, pad=0.04)
+    ax.set_title(title, fontsize=15, pad=10)
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Predicted", fontsize=12)
+    ax.set_ylabel("True", fontsize=12)
+
+    thresh = display.max() / 2.0 if display.size > 0 else 0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            text = f"{display[i, j]:.2f}" if normalize else str(int(cm[i, j]))
+            ax.text(
+                j,
+                i,
+                text,
+                ha="center",
+                va="center",
+                color="white" if display[i, j] > thresh else "black",
+                fontsize=10,
+            )
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_age_scatter(y_true, y_pred, out_path):
+    plt, _, _ = _load_plotting()
+
+    if len(y_true) == 0:
+        print("[PLOT] Skip age scatter: no age labels")
+        return
+    plt.figure(figsize=(6.8, 6.2))
+    ax = plt.gca()
+    _apply_common_style(ax)
+    ax.scatter(y_true, y_pred, s=12, alpha=0.35)
+    lo = float(min(np.min(y_true), np.min(y_pred)))
+    hi = float(max(np.max(y_true), np.max(y_pred)))
+    ax.plot(
+        [lo, hi], [lo, hi], linestyle="--", linewidth=2, color="black", label="Ideal"
+    )
+    ax.set_title("Age Prediction - True vs Predicted", fontsize=15, pad=10)
+    ax.set_xlabel("True Age", fontsize=12)
+    ax.set_ylabel("Predicted Age", fontsize=12)
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_age_error_hist(y_true, y_pred, out_path):
+    plt, _, _ = _load_plotting()
+
+    if len(y_true) == 0:
+        print("[PLOT] Skip age error histogram: no age labels")
+        return
+    errors = y_pred - y_true
+    abs_errors = np.abs(errors)
+    plt.figure(figsize=(10, 4.6))
+    ax = plt.gca()
+    _apply_common_style(ax)
+    ax.hist(abs_errors, bins=30, color="#1f77b4", alpha=0.85)
+    ax.axvline(
+        abs_errors.mean(), linestyle="--", color="black", linewidth=2, label="Mean"
+    )
+    ax.set_title("Age Absolute Error Distribution", fontsize=15, pad=10)
+    ax.set_xlabel("Absolute Error (years)", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.legend(loc="best", frameon=True, framealpha=0.85)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_age_distribution(y_true, out_path):
+    plt, _, _ = _load_plotting()
+
+    if len(y_true) == 0:
+        print("[PLOT] Skip age distribution: no age labels")
+        return
+    plt.figure(figsize=(10, 4.6))
+    ax = plt.gca()
+    _apply_common_style(ax)
+    ax.hist(y_true, bins=30, color="#1f77b4", alpha=0.85)
+    ax.set_title("Age Distribution - Validation", fontsize=15, pad=10)
+    ax.set_xlabel("Age", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_class_distribution(y_true, labels, out_path, title):
+    plt, _, _ = _load_plotting()
+
+    if len(y_true) == 0:
+        print(f"[PLOT] Skip {title}: no labels")
+        return
+    counts = np.bincount(y_true.astype(int), minlength=len(labels))[: len(labels)]
+    plt.figure(figsize=(9, 4.8))
+    ax = plt.gca()
+    _apply_common_style(ax)
+    ax.bar(np.arange(len(labels)), counts, color="#1f77b4", alpha=0.85)
+    ax.set_title(title, fontsize=15, pad=10)
+    ax.set_xlabel("Class", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    for i, c in enumerate(counts):
+        ax.text(i, c, str(int(c)), ha="center", va="bottom", fontsize=10)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_per_class_accuracy(cm, labels, out_path, title):
+    plt, _, FuncFormatter = _load_plotting()
+
+    totals = cm.sum(axis=1)
+    acc = np.divide(
+        np.diag(cm), totals, out=np.zeros_like(totals, dtype=float), where=totals > 0
+    )
+    plt.figure(figsize=(9, 4.8))
+    ax = plt.gca()
+    _apply_common_style(ax)
+    ax.bar(np.arange(len(labels)), acc * 100.0, color="#1f77b4", alpha=0.85)
+    ax.set_title(title, fontsize=15, pad=10)
+    ax.set_xlabel("Class", fontsize=12)
+    ax.set_ylabel("Accuracy (%)", fontsize=12)
+    ax.set_ylim(0, 100)
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0f}%"))
+    for i, value in enumerate(acc * 100.0):
+        ax.text(i, value, f"{value:.1f}%", ha="center", va="bottom", fontsize=10)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close()
+
+
+def plot_final_evaluation(metrics, output_dir, gender_names, emotion_names):
+    preds = metrics.get("predictions", {})
+
+    age_true = preds.get("age_true", np.array([]))
+    age_pred = preds.get("age_pred", np.array([]))
+    plot_age_scatter(
+        age_true,
+        age_pred,
+        os.path.join(output_dir, "fig8_age_true_vs_pred.png"),
+    )
+    plot_age_error_hist(
+        age_true,
+        age_pred,
+        os.path.join(output_dir, "fig9_age_error_hist.png"),
+    )
+    plot_age_distribution(
+        age_true,
+        os.path.join(output_dir, "fig10_age_distribution.png"),
+    )
+
+    gender_true = preds.get("gender_true", np.array([]))
+    gender_pred = preds.get("gender_pred", np.array([]))
+    if len(gender_true) > 0:
+        gender_cm = _confusion_matrix_np(gender_true, gender_pred, len(gender_names))
+        plot_confusion_matrix(
+            gender_cm,
+            gender_names,
+            os.path.join(output_dir, "fig11_gender_confusion_matrix.png"),
+            "Gender Confusion Matrix - Validation",
+        )
+        plot_class_distribution(
+            gender_true,
+            gender_names,
+            os.path.join(output_dir, "fig12_gender_distribution.png"),
+            "Gender Distribution - Validation",
+        )
+
+    emotion_true = preds.get("emotion_true", np.array([]))
+    emotion_pred = preds.get("emotion_pred", np.array([]))
+    if len(emotion_true) > 0:
+        emotion_cm = _confusion_matrix_np(
+            emotion_true, emotion_pred, len(emotion_names)
+        )
+        plot_confusion_matrix(
+            emotion_cm,
+            emotion_names,
+            os.path.join(output_dir, "fig13_emotion_confusion_matrix.png"),
+            "Emotion Confusion Matrix - Validation",
+        )
+        plot_per_class_accuracy(
+            emotion_cm,
+            emotion_names,
+            os.path.join(output_dir, "fig14_emotion_per_class_accuracy.png"),
+            "Emotion Per-Class Accuracy - Validation",
+        )
+        plot_class_distribution(
+            emotion_true,
+            emotion_names,
+            os.path.join(output_dir, "fig15_emotion_distribution.png"),
+            "Emotion Distribution - Validation",
+        )
+
+    print("[PLOT] Saved final validation evaluation plots fig8-fig15")
+
+
 # --------------------
-# PHẦN 6: XUẤT ONNX
+# PART 6: EXPORT ONNX
 # --------------------
 
 
@@ -1302,7 +1607,7 @@ class _FaceAttrONNXWrapper(nn.Module):
     def forward(self, x):
         out = self.model(x)
         # out["age"]: (B,), out["gender"]: (B,2), out["emotion"]: (B,K)
-        # ONNX thích tensor 2D hơn cho scalar -> reshape age thành (B,1)
+        # ONNX handles 2D scalar outputs better, so reshape age to (B,1)
         age = out["age"].unsqueeze(1)
         gender_logits = out["gender"]
         emotion_logits = out["emotion"]
@@ -1312,10 +1617,11 @@ class _FaceAttrONNXWrapper(nn.Module):
 def export_faceattr_to_onnx(
     pth_path: str,
     onnx_path: str,
-    img_size: int = 224,
+    img_size: int = 256,
     backbone_name: str = "resnet50",
     emo_classes: int = 7,
     device: str = "cpu",
+    strict: bool = True,
 ):
     """
     Export FaceAttrModel to ONNX.
@@ -1325,28 +1631,29 @@ def export_faceattr_to_onnx(
       - emotion_logits: (B,K)
     """
 
-    # 1) Build model (đúng constructor FaceAttrModel của bạn)
+    # 1) Build the model using the matching FaceAttrModel constructor
     model = FaceAttrModel(
         backbone_name=backbone_name,
-        pretrained=None,  # export thì không cần load pretrained theo đường này
+        pretrained=None,  # export does not need to load pretrained weights through this path
         emo_classes=emo_classes,
     ).to(device)
 
     # 2) Load checkpoint
     ckpt = torch.load(pth_path, map_location=device)
 
-    # Nếu bạn save kiểu {"model_state_dict": ...}
+    # If the checkpoint was saved as {"model_state_dict": ...}
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         sd = ckpt["model_state_dict"]
     else:
         sd = ckpt
 
-    # 3) Load state dict
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    if missing:
-        print("[WARN] Missing keys:", missing)
-    if unexpected:
-        print("[WARN] Unexpected keys:", unexpected)
+    # 3) Load state dict. Keep this strict by default so a wrong checkpoint
+    # cannot silently export a partially random model.
+    missing, unexpected = model.load_state_dict(sd, strict=strict)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint mismatch. Missing keys: {missing}. Unexpected keys: {unexpected}."
+        )
 
     model.eval()
 
@@ -1362,7 +1669,7 @@ def export_faceattr_to_onnx(
         onnx_path,
         input_names=["input"],
         output_names=["age", "gender_logits", "emotion_logits"],
-        opset_version=18,
+        opset_version=17,
         dynamic_axes={
             "input": {0: "batch"},
             "age": {0: "batch"},
@@ -1375,7 +1682,7 @@ def export_faceattr_to_onnx(
 
 
 # --------------------
-# PHẦN 7: INFERENCE
+# PART 7: INFERENCE
 # --------------------
 
 
@@ -1397,19 +1704,19 @@ class FaceAttrPredictor:
         self,
         ckpt_path: str,
         device=None,
-        backbone_name="resnet50_pretrained",
+        backbone_name="resnet50",
         emo_classes=7,
-        img_size=224,
-        pretrained_backbone_path=None,  # chỉ cần nếu bạn instantiate backbone theo kiểu load ngoài
+        img_size=256,
+        pretrained_backbone_path=None,
     ):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # Build model (quan trọng: backbone_name & emo_classes phải khớp lúc train)
+        # Build model; backbone_name and emo_classes must match training
         self.model = FaceAttrModel(
             backbone_name=backbone_name,
-            pretrained=pretrained_backbone_path,  # có thể None nếu FaceBackbone đã được fix như mục (D)
+            pretrained=pretrained_backbone_path,
             emo_classes=emo_classes,
         ).to(self.device)
 
@@ -1424,7 +1731,7 @@ class FaceAttrPredictor:
         if any(k.startswith("module.") for k in sd.keys()):
             sd = {k[len("module.") :]: v for k, v in sd.items()}
 
-        self.model.load_state_dict(sd, strict=False)
+        self.model.load_state_dict(sd, strict=True)
         self.model.eval()
 
         # Transform as validation

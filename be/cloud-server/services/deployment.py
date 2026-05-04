@@ -1,17 +1,18 @@
 """
-Model Deployment Service
-Handles model deployment to edge devices via MQTT
+Model deployment via MQTT notifications.
 """
-import os
+import hashlib
 import json
 import logging
-from typing import List, Optional
+import os
 from datetime import datetime
-import hashlib
+from typing import List, Optional
+
+import paho.mqtt.client as mqtt
+
+from config import get_settings
 from database.db import SessionLocal
 from database.models import ModelVersion
-from services.mqtt_subscriber import get_mqtt_client
-from config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -19,19 +20,28 @@ settings = get_settings()
 
 class ModelDeploymentService:
     """Service for deploying models to edge devices"""
-    
+
     def __init__(self):
         self.mqtt_client = None
-        self.db = SessionLocal()
-    
+
     def connect_mqtt(self):
         """Connect to MQTT broker"""
         try:
-            self.mqtt_client = get_mqtt_client()
+            self.mqtt_client = mqtt.Client(client_id="cloud_model_deployment")
+            if settings.MQTT_USERNAME:
+                self.mqtt_client.username_pw_set(
+                    settings.MQTT_USERNAME, settings.MQTT_PASSWORD
+                )
+            self.mqtt_client.connect(
+                settings.MQTT_BROKER,
+                settings.MQTT_PORT,
+                settings.MQTT_KEEPALIVE,
+            )
+            self.mqtt_client.loop_start()
             logger.info("Model deployment service connected to MQTT")
         except Exception as e:
             logger.error(f"Failed to connect to MQTT: {e}")
-    
+
     def deploy_model(
         self,
         model_version: str,
@@ -47,51 +57,55 @@ class ModelDeploymentService:
         Returns:
             Deployment status dict
         """
-        # Get model from database
-        model = self.db.query(ModelVersion).filter(
-            ModelVersion.version == model_version
-        ).first()
-        
-        if not model:
-            raise ValueError(f"Model version {model_version} not found")
-        
-        # Prepare deployment message
-        deployment_message = {
-            "action": "model_update",
-            "model_version": model.version,
-            "model_type": model.model_type,
-            "model_path": model.model_path,
-            "model_size_mb": model.model_size_mb,
-            "model_format": model.model_format,
-            "checksum": self._calculate_checksum(model.model_path),
-            "deployed_at": datetime.now().isoformat(),
-            "target_branches": target_branches or ["all"]
-        }
-        
-        # Publish to MQTT
-        if target_branches:
-            # Deploy to specific branches
-            for branch_id in target_branches:
-                topic = f"{settings.MQTT_TOPIC_MODEL_UPDATES}/{branch_id}"
+        db = SessionLocal()
+        try:
+            model = db.query(ModelVersion).filter(
+                ModelVersion.version == model_version
+            ).first()
+
+            if not model:
+                raise ValueError(f"Model version {model_version} not found")
+
+            checksum = self._calculate_checksum(model.model_path)
+            deployment_message = {
+                "action": "model_update",
+                "version": model.version,
+                "model_type": model.model_type,
+                "model_format": model.model_format,
+                "download_path": f"/api/v1/models/{model.version}/download",
+                "model_size_mb": model.model_size_mb,
+                "checksum": checksum,
+                "deployed_at": datetime.now().isoformat(),
+                "target_branches": target_branches or ["all"],
+            }
+
+            if target_branches:
+                for branch_id in target_branches:
+                    topic = f"retail/{branch_id}/model/update"
+                    self._publish_update(topic, deployment_message)
+            else:
+                topic = "retail/all/model/update"
                 self._publish_update(topic, deployment_message)
-        else:
-            # Broadcast to all branches
-            topic = f"{settings.MQTT_TOPIC_MODEL_UPDATES}/all"
-            self._publish_update(topic, deployment_message)
-        
-        # Update model status
-        model.is_active = True
-        model.deployed_to_branches = target_branches or ["all"]
-        self.db.commit()
-        
-        logger.info(f"Model {model_version} deployed to {target_branches or 'all branches'}")
-        
-        return {
-            "status": "deployed",
-            "model_version": model_version,
-            "target_branches": target_branches or "all",
-            "deployment_time": datetime.now().isoformat()
-        }
+
+            self._deactivate_other_versions(
+                db, model.model_type, exclude_version=model.version
+            )
+            model.is_active = True
+            model.deployed_to_branches = target_branches or ["all"]
+            db.commit()
+
+            logger.info(
+                f"Model {model_version} deployed to {target_branches or 'all branches'}"
+            )
+
+            return {
+                "status": "deployed",
+                "model_version": model_version,
+                "target_branches": target_branches or "all",
+                "deployment_time": datetime.now().isoformat(),
+            }
+        finally:
+            db.close()
     
     def rollback_model(
         self,
@@ -110,25 +124,18 @@ class ModelDeploymentService:
         Returns:
             Rollback status dict
         """
-        # Get target model
-        target_model = self.db.query(ModelVersion).filter(
-            ModelVersion.model_type == model_type,
-            ModelVersion.version == target_version
-        ).first()
-        
-        if not target_model:
-            raise ValueError(f"Target version {target_version} not found")
-        
-        # Deactivate current active model
-        current_model = self.db.query(ModelVersion).filter(
-            ModelVersion.model_type == model_type,
-            ModelVersion.is_active == True
-        ).first()
-        
-        if current_model:
-            current_model.is_active = False
-        
-        # Deploy target version
+        db = SessionLocal()
+        try:
+            target_model = db.query(ModelVersion).filter(
+                ModelVersion.model_type == model_type,
+                ModelVersion.version == target_version
+            ).first()
+
+            if not target_model:
+                raise ValueError(f"Target version {target_version} not found")
+        finally:
+            db.close()
+
         return self.deploy_model(target_version, target_branches)
     
     def check_deployment_status(
@@ -141,34 +148,46 @@ class ModelDeploymentService:
         Returns:
             Status dict with deployment info
         """
-        model = self.db.query(ModelVersion).filter(
-            ModelVersion.version == model_version
-        ).first()
-        
-        if not model:
-            raise ValueError(f"Model version {model_version} not found")
-        
-        return {
-            "version": model.version,
-            "is_active": model.is_active,
-            "deployed_to_branches": model.deployed_to_branches,
-            "deployment_time": model.updated_at.isoformat()
-        }
+        db = SessionLocal()
+        try:
+            model = db.query(ModelVersion).filter(
+                ModelVersion.version == model_version
+            ).first()
+
+            if not model:
+                raise ValueError(f"Model version {model_version} not found")
+
+            return {
+                "version": model.version,
+                "is_active": model.is_active,
+                "deployed_to_branches": model.deployed_to_branches,
+                "deployment_time": model.updated_at.isoformat()
+            }
+        finally:
+            db.close()
     
     def _publish_update(self, topic: str, message: dict):
         """Publish deployment message to MQTT"""
         try:
             if self.mqtt_client:
-                self.mqtt_client.publish(
-                    topic,
-                    json.dumps(message),
-                    qos=1  # At least once delivery
-                )
+                result = self.mqtt_client.publish(topic, json.dumps(message), qos=1)
+                if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                    raise RuntimeError(f"MQTT publish failed with code {result.rc}")
                 logger.info(f"Published model update to {topic}")
             else:
                 logger.warning("MQTT client not connected, cannot publish")
         except Exception as e:
             logger.error(f"Failed to publish model update: {e}")
+
+    def _deactivate_other_versions(self, db, model_type: str, exclude_version: str) -> None:
+        """Keep only the deployed version active for a given model type."""
+        active_models = db.query(ModelVersion).filter(
+            ModelVersion.model_type == model_type,
+            ModelVersion.version != exclude_version,
+            ModelVersion.is_active == True,
+        ).all()
+        for item in active_models:
+            item.is_active = False
     
     def _calculate_checksum(self, file_path: str) -> str:
         """Calculate SHA256 checksum of model file"""
@@ -205,8 +224,12 @@ class ModelDeploymentService:
     
     def __del__(self):
         """Cleanup on destroy"""
-        if self.db:
-            self.db.close()
+        if self.mqtt_client:
+            try:
+                self.mqtt_client.loop_stop()
+                self.mqtt_client.disconnect()
+            except Exception:
+                pass
 
 
 # Global instance

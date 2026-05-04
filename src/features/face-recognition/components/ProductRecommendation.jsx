@@ -21,6 +21,25 @@ const getRecommendationSessionId = () => {
     return sessionId;
 };
 
+const CHECKOUT_DRAFT_KEY = 'fbrs_product_checkout_draft';
+
+const readCheckoutDraft = () => {
+    if (typeof window === 'undefined') return { cart: [], showPayment: false };
+
+    try {
+        const raw = window.sessionStorage.getItem(CHECKOUT_DRAFT_KEY);
+        if (!raw) return { cart: [], showPayment: false };
+
+        const parsed = JSON.parse(raw);
+        return {
+            cart: Array.isArray(parsed.cart) ? parsed.cart : [],
+            showPayment: Boolean(parsed.showPayment && parsed.cart?.length),
+        };
+    } catch {
+        return { cart: [], showPayment: false };
+    }
+};
+
 // --- HELPER: Map data DB -> UI ---
 const mapDbProductToUi = (p) => {
     const originalPrice = Number(p.price ?? 0);
@@ -47,16 +66,67 @@ const mapDbProductToUi = (p) => {
         stock: p.stock ?? 0,
         hasDiscount,
         discountPercentage,
-        description: p.description || ""
+        description: p.description || "",
+        targetGender: p.target_gender?.toLowerCase() || 'unisex',
+        targetAgeGroup: p.target_age_group || 'all'
     };
+};
+
+const normalizeAgeGroup = (value) => {
+    if (!value) return '';
+    return String(value).trim().toLowerCase().replace('-', '_');
+};
+
+const isAgeGroupMatch = (targetAgeGroup, customerAge, customerAgeGroup) => {
+    const target = normalizeAgeGroup(targetAgeGroup);
+    if (!target || ['all', 'any', 'unisex'].includes(target)) return true;
+
+    const normalizedCustomerAgeGroup = normalizeAgeGroup(customerAgeGroup);
+    if (normalizedCustomerAgeGroup && target === normalizedCustomerAgeGroup) return true;
+
+    const age = Number(customerAge);
+    if (!Number.isFinite(age)) return false;
+
+    if (target.includes('_')) {
+        const [min, max] = target.split('_').map(Number);
+        return Number.isFinite(min) && Number.isFinite(max) && age >= min && age <= max;
+    }
+
+    if (target.endsWith('_plus') || target.endsWith('+')) {
+        const min = Number(target.replace('_plus', '').replace('+', ''));
+        return Number.isFinite(min) && age >= min;
+    }
+
+    return false;
+};
+
+const getDemographicRecommendationScore = (product, customer) => {
+    let score = 0;
+    const customerGender = customer?.gender?.toLowerCase();
+    const targetGender = product.targetGender?.toLowerCase();
+
+    if (customerGender) {
+        if (targetGender === customerGender) {
+            score += 50;
+        } else if (['unisex', 'all', 'any'].includes(targetGender)) {
+            score += 25;
+        }
+    }
+
+    if (isAgeGroupMatch(product.targetAgeGroup, customer?.age, customer?.age_group)) {
+        score += 40;
+    }
+
+    return score;
 };
 
 const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose, onViewProfile }) => {
     const navigate = useNavigate();
     const { user, setUser } = useAuth();
+    const checkoutDraft = useMemo(readCheckoutDraft, []);
 
     // --- STATE ---
-    const [cart, setCart] = useState([]);
+    const [cart, setCart] = useState(checkoutDraft.cart);
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState('cart'); // 'cart' | 'history' | 'profile'
     const [loggingOut, setLoggingOut] = useState(false);
@@ -72,7 +142,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     const { historyInvoices, isLoading: loadingHistory } = useCustomerHistory(customer?.customer_id);
     const [selectedProduct, setSelectedProduct] = useState(null);
     const [historyStack, setHistoryStack] = useState([]);
-    const [showPayment, setShowPayment] = useState(false);
+    const [showPayment, setShowPayment] = useState(checkoutDraft.showPayment);
     const sessionIdRef = useRef(null);
     const trackedImpressionsRef = useRef(new Set());
     const trackedAcceptancesRef = useRef(new Set());
@@ -80,6 +150,22 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     if (!sessionIdRef.current && typeof window !== 'undefined') {
         sessionIdRef.current = getRecommendationSessionId();
     }
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+
+        if (!cart.length && !showPayment) {
+            window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
+            return;
+        }
+
+        window.sessionStorage.setItem(CHECKOUT_DRAFT_KEY, JSON.stringify({
+            cart,
+            showPayment,
+            customerId: customer?.customer_id ?? customer?.id ?? null,
+            updatedAt: Date.now(),
+        }));
+    }, [cart, showPayment, customer]);
 
     // --- LOGIC TÍNH TOÁN ---
     const purchaseStats = useMemo(() => {
@@ -124,7 +210,14 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                 return b.hasDiscount ? 1 : -1;
             }
 
-            // Ưu tiên 3 (FALLBACK): Tồn kho & Tên
+            // Ưu tiên 3: Phù hợp giới tính và độ tuổi của khách hàng
+            const demographicScoreA = getDemographicRecommendationScore(a, customer);
+            const demographicScoreB = getDemographicRecommendationScore(b, customer);
+            if (demographicScoreB !== demographicScoreA) {
+                return demographicScoreB - demographicScoreA;
+            }
+
+            // Ưu tiên 4 (FALLBACK): Tồn kho & Tên
             // Nếu không có lịch sử, không giảm giá -> Hiện cái nào còn nhiều hàng trước
             if (b.stock !== a.stock) {
                 return b.stock - a.stock;
@@ -135,7 +228,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
         });
 
         return list;
-    }, [dbProducts, searchTerm, purchaseStats]);
+    }, [dbProducts, searchTerm, purchaseStats, customer]);
 
     React.useEffect(() => {
         if (selectedProduct && selectedProduct.id) {
@@ -287,6 +380,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
         } catch (error) {
             console.error(error);
         } finally {
+            window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
             setUser(null);
             navigate('/login', { replace: true });
         }
@@ -697,6 +791,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                     customerTier={customer?.tier}
                     onBack={() => setShowPayment(false)}
                     onPaymentComplete={() => {
+                        window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
                         setCart([]);
                         setShowPayment(false);
                         onClose?.();

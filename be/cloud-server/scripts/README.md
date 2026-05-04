@@ -14,6 +14,32 @@ python be\cloud-server\scripts\seed_data.py
 
 The script reads `DATABASE_URL` from the environment. When running through Docker Compose, the Cloud server uses the database URL defined in `be/.env` and `docker-compose.cloud.yml`.
 
+Default profile is `render_free`, which seeds a smaller dataset suitable for limited database storage.
+
+Common options:
+
+```powershell
+$env:SEED_PROFILE="render_free"
+python be\cloud-server\scripts\seed_data.py
+```
+
+```powershell
+$env:SEED_PROFILE="compact"
+$env:SEED_TRANSACTION_COUNT="150"
+python be\cloud-server\scripts\seed_data.py
+```
+
+Useful environment variables:
+
+- `SEED_PROFILE`: `render_free`, `compact`, or `full`
+- `SEED_PRODUCT_LIMIT`
+- `SEED_CUSTOMER_COUNT`
+- `SEED_TRANSACTION_COUNT`
+- `SEED_INCLUDE_PRIVACY_LOGS`
+- `SEED_INCLUDE_MODELING_TABLES`
+- `SEED_INCLUDE_PROMOTIONS`
+- `RESET_DB`: `true` or `false`
+
 ## `export_postgres.py`
 
 Create a PostgreSQL backup from the running `postgres-db` Docker container using `pg_dump`.

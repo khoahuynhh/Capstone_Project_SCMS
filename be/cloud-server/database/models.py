@@ -18,7 +18,6 @@ from sqlalchemy import Date
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.orm import relationship
 
-
 Base = declarative_base()
 
 
@@ -51,13 +50,19 @@ class Product(Base):
 
 class ProductAssociation(Base):
     """
-    Lưu trữ kết quả từ thuật toán Data Mining (Apriori / FP-Growth).
+    Lưu trữ kết quả từ thuật toán Data Mining (Apriori / FP-Growth / Eclat).
     Dùng để gợi ý: "Sản phẩm thường được mua cùng nhau".
     """
 
     __tablename__ = "product_associations"
 
     id = Column(Integer, primary_key=True, index=True)
+    source_rule_id = Column(
+        Integer,
+        ForeignKey("association_rules_raw.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
 
     # Sản phẩm gốc (sản phẩm khách đang xem)
     product_id = Column(
@@ -87,11 +92,70 @@ class ProductAssociation(Base):
     # Quan hệ để dễ dàng lấy thông tin sản phẩm liên quan khi query
     product = relationship("Product", foreign_keys=[product_id])
     related_product = relationship("Product", foreign_keys=[related_product_id])
+    source_rule = relationship("AssociationRuleRaw")
 
     # Đảm bảo không lưu lặp lại một cặp luật
     __table_args__ = (
         UniqueConstraint(
             "product_id", "related_product_id", name="_product_related_uc"
+        ),
+    )
+
+
+class AssociationRuleRaw(Base):
+    """Source of truth for mined association rules in N -> M form."""
+
+    __tablename__ = "association_rules_raw"
+
+    id = Column(Integer, primary_key=True, index=True)
+    antecedent_product_ids = Column(JSON, nullable=False)
+    consequent_product_ids = Column(JSON, nullable=False)
+    antecedent_size = Column(Integer, nullable=False, index=True)
+    consequent_size = Column(Integer, nullable=False, index=True)
+    confidence = Column(Float, nullable=False)
+    lift = Column(Float, nullable=True)
+    support = Column(Float, nullable=True)
+    algorithm = Column(String(50), nullable=False, default="fp-growth")
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    generated_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index(
+            "ix_association_rules_raw_sizes",
+            "antecedent_size",
+            "consequent_size",
+        ),
+    )
+
+
+class CartAssociationRule(Base):
+    """Cache for non-1-1 association rules used at cart/checkout time."""
+
+    __tablename__ = "cart_association_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_rule_id = Column(
+        Integer,
+        ForeignKey("association_rules_raw.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    antecedent_product_ids = Column(JSON, nullable=False)
+    consequent_product_ids = Column(JSON, nullable=False)
+    antecedent_size = Column(Integer, nullable=False, index=True)
+    consequent_size = Column(Integer, nullable=False, index=True)
+    confidence = Column(Float, nullable=False)
+    lift = Column(Float, nullable=True)
+    support = Column(Float, nullable=True)
+
+    source_rule = relationship("AssociationRuleRaw")
+
+    __table_args__ = (
+        Index(
+            "ix_cart_association_rules_sizes",
+            "antecedent_size",
+            "consequent_size",
         ),
     )
 
@@ -174,7 +238,9 @@ class RecommendationEvent(Base):
     product_id = Column(Integer, ForeignKey("products.id"), index=True, nullable=False)
     customer_id = Column(Integer, ForeignKey("customers.id"), index=True, nullable=True)
     branch_id = Column(String(50), ForeignKey("stores.id"), index=True, nullable=True)
-    device_id = Column(String(50), ForeignKey("edge_devices.id"), index=True, nullable=True)
+    device_id = Column(
+        String(50), ForeignKey("edge_devices.id"), index=True, nullable=True
+    )
     surface = Column(String(80), index=True, nullable=False)
     algorithm = Column(String(80), nullable=True)
     position = Column(Integer, nullable=True)
@@ -405,7 +471,7 @@ class Promotion(Base):
     __tablename__ = "promotions"
 
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(50), unique=True, nullable=False, index=True)  
+    code = Column(String(50), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
 
     # PERCENT | FIXED | PROMO_PRICE

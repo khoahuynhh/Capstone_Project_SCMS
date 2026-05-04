@@ -78,12 +78,16 @@ cd be
 docker compose -f docker-compose.cloud.yml up -d --build
 ```
 
+docker compose -f docker-compose.cloud.yml up -d
+
 Start the Edge stack:
 
 ```powershell
 cd be
 docker compose -f docker-compose.edge.yml up -d --build
 ```
+
+docker compose -f docker-compose.edge.yml up -d
 
 Start the UI from the repository root:
 

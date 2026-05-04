@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi.responses import FileResponse
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict
@@ -8,6 +9,7 @@ from database.models import ModelVersion
 import logging
 import os
 import shutil
+from services.deployment import get_deployment_service
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,33 @@ async def get_model(version: str, db: Session = Depends(get_db)):
     return model
 
 
+@router.get("/{version}/download")
+async def download_model(version: str, db: Session = Depends(get_db)):
+    """Download the model artifact for a specific version."""
+    from fastapi.concurrency import run_in_threadpool
+
+    def query_model():
+        return db.query(ModelVersion).filter(ModelVersion.version == version).first()
+
+    model = await run_in_threadpool(query_model)
+
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model version {version} not found")
+
+    if not model.model_path or not os.path.exists(model.model_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model artifact for version {version} is not available",
+        )
+
+    filename = os.path.basename(model.model_path)
+    return FileResponse(
+        path=model.model_path,
+        filename=filename,
+        media_type="application/octet-stream",
+    )
+
+
 @router.post("/upload", response_model=ModelUploadResponse)
 async def upload_model(
     version: str,
@@ -159,25 +188,32 @@ async def deploy_model(request: ModelDeployRequest, db: Session = Depends(get_db
     
     if not model:
         raise HTTPException(status_code=404, detail=f"Model version {request.version} not found")
-    
-    # Update deployment status
-    def update_deployment():
-        model.deployed_to_branches = request.target_branches or ["all"]
-        model.is_active = True
-        db.commit()
-    
-    await run_in_threadpool(update_deployment)
-    
-    # TODO: Trigger MQTT model update message
-    # This will be implemented in deployment service
-    
+
+    deployment_service = get_deployment_service()
+
+    try:
+        result = await run_in_threadpool(
+            deployment_service.deploy_model,
+            request.version,
+            request.target_branches,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to deploy model %s", request.version)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deploy model {request.version}",
+        ) from exc
+
     logger.info(f"Model {request.version} deployed to {request.target_branches or 'all branches'}")
-    
+
     return {
         "status": "success",
         "version": request.version,
-        "deployed_to": request.target_branches or "all branches",
-        "message": "Deployment initiated. Edge devices will update automatically."
+        "deployed_to": result["target_branches"],
+        "message": "Deployment initiated. Edge devices will update automatically.",
+        "deployment_time": result["deployment_time"],
     }
 
 
@@ -209,25 +245,37 @@ async def rollback_model(request: ModelRollbackRequest, db: Session = Depends(ge
             detail=f"Target version {request.target_version} not found"
         )
     
-    def perform_rollback():
-        # Deactivate current
-        if current_model:
-            current_model.is_active = False
-        
-        # Activate target
-        target_model.is_active = True
-        db.commit()
-    
-    await run_in_threadpool(perform_rollback)
-    
+    deployment_service = get_deployment_service()
+
+    try:
+        result = await run_in_threadpool(
+            deployment_service.rollback_model,
+            request.model_type,
+            request.target_version,
+            None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception(
+            "Failed to rollback model type %s to version %s",
+            request.model_type,
+            request.target_version,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to rollback to version {request.target_version}",
+        ) from exc
+
     logger.info(f"Rolled back {request.model_type} to version {request.target_version}")
-    
+
     return {
         "status": "success",
         "model_type": request.model_type,
         "previous_version": current_model.version if current_model else None,
         "current_version": request.target_version,
-        "message": "Rollback completed. Edge devices will update automatically."
+        "message": "Rollback completed. Edge devices will update automatically.",
+        "deployment_time": result["deployment_time"],
     }
 
 

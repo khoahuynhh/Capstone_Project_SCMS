@@ -2,9 +2,14 @@ import paho.mqtt.client as mqtt
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 import base64
+import hashlib
+import tempfile
+import urllib.request
+import urllib.parse
 import numpy as np
 from threading import Event, Lock
 
@@ -14,8 +19,9 @@ logger = logging.getLogger(__name__)
 class MQTTClient:
     """MQTT client for Edge-Cloud communication"""
 
-    def __init__(self, branch_id):
+    def __init__(self, branch_id, on_model_update=None):
         self.branch_id = branch_id
+        self.on_model_update = on_model_update
         broker = os.getenv("MQTT_BROKER", "mosquitto:1883")
         if ":" in broker:
             self.broker_host, broker_port = broker.rsplit(":", 1)
@@ -90,10 +96,11 @@ class MQTTClient:
 
             # Subscribe to relevant topics
             self.client.subscribe(self.topics["model_update"])
+            self.client.subscribe("retail/all/model/update")
             self.client.subscribe(self.topics["config_update"])
             self.client.subscribe(self.topics["face_identify_resp"])
             logger.info(
-                f"Subscribed to: {self.topics['model_update']}, {self.topics['config_update']}"
+                f"Subscribed to: {self.topics['model_update']}, retail/all/model/update, {self.topics['config_update']}"
             )
         else:
             logger.error(f"Connection failed with code {rc}")
@@ -217,20 +224,59 @@ class MQTTClient:
         """Handle model update notification from cloud"""
         logger.info(f"Model update received: {payload}")
 
-        model_url = payload.get("model_url")
-        model_version = payload.get("version")
+        model_version = payload.get("version") or payload.get("model_version")
+        download_path = payload.get("download_path")
+        checksum = payload.get("checksum")
 
-        # In production, download and load new model
-        logger.info(f"Would download model from: {model_url} (version {model_version})")
+        if not model_version or not download_path:
+            logger.error("Invalid model update payload: %s", payload)
+            self.publish_event(
+                "model_update_ack",
+                {
+                    "branch_id": self.branch_id,
+                    "model_version": model_version,
+                    "status": "failed",
+                    "reason": "invalid_payload",
+                    "timestamp": time.time(),
+                },
+            )
+            return
 
-        # Acknowledge update
-        ack_data = {
-            "branch_id": self.branch_id,
-            "model_version": model_version,
-            "status": "updated",
-            "timestamp": time.time(),
-        }
-        self.publish_event("model_update_ack", ack_data)
+        try:
+            if self.on_model_update is None:
+                raise RuntimeError("model_reload_handler_missing")
+
+            base_url = os.getenv("CLOUD_API", "http://localhost:8000").rstrip("/")
+            model_url = urllib.parse.urljoin(f"{base_url}/", download_path.lstrip("/"))
+            local_model_path = self._download_model(model_url, model_version, checksum)
+            self.on_model_update(
+                local_model_path,
+                {
+                    "version": model_version,
+                    "checksum": checksum,
+                    "model_type": payload.get("model_type"),
+                    "model_format": payload.get("model_format"),
+                },
+            )
+            ack_data = {
+                "branch_id": self.branch_id,
+                "model_version": model_version,
+                "status": "updated",
+                "timestamp": time.time(),
+            }
+            self.publish_event("model_update_ack", ack_data)
+        except Exception as exc:
+            logger.exception("Model update failed for version %s", model_version)
+            self.publish_event(
+                "model_update_ack",
+                {
+                    "branch_id": self.branch_id,
+                    "model_version": model_version,
+                    "status": "failed",
+                    "reason": str(exc),
+                    "timestamp": time.time(),
+                },
+            )
 
     def _handle_config_update(self, payload: dict):
         """Handle configuration update from cloud"""
@@ -252,3 +298,44 @@ class MQTTClient:
         self.client.loop_stop()
         self.client.disconnect()
         logger.info("MQTT client disconnected")
+
+    def _download_model(self, model_url: str, model_version: str, checksum: str | None) -> str:
+        """Download a model artifact from cloud and verify checksum when available."""
+        configured_path = os.getenv("MODEL_STORAGE_PATH", "models")
+        if os.path.isabs(configured_path):
+            models_dir = configured_path
+        else:
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+            models_dir = os.path.join(base_dir, configured_path)
+        os.makedirs(models_dir, exist_ok=True)
+
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f"model_{model_version}_",
+            suffix=".tmp",
+            dir=models_dir,
+        )
+        os.close(fd)
+
+        try:
+            with urllib.request.urlopen(model_url, timeout=60) as response, open(
+                tmp_path, "wb"
+            ) as output:
+                shutil.copyfileobj(response, output)
+
+            if checksum:
+                downloaded_checksum = self._calculate_checksum(tmp_path)
+                if downloaded_checksum.lower() != checksum.lower():
+                    raise ValueError("checksum_mismatch")
+
+            return tmp_path
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    def _calculate_checksum(self, file_path: str) -> str:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as model_file:
+            for byte_block in iter(lambda: model_file.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()

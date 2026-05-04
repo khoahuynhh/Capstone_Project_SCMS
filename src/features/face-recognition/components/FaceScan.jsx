@@ -1,15 +1,73 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import "../css/FaceScan.css";
 import FaceAIRecommendation from "./FaceAIRecommendation";
 
 import { edgeApi } from "../../../core/api/edge_api";
 
+const GENDER_LABELS = {
+  male: "Nam",
+  female: "Nữ",
+  man: "Nam",
+  woman: "Nữ",
+  unknown: "Không xác định",
+};
+
+const EMOTION_LABELS = {
+  neutral: "Bình thường",
+  happy: "Vui vẻ",
+  sad: "Buồn",
+  angry: "Tức giận",
+  surprise: "Ngạc nhiên",
+  surprised: "Ngạc nhiên",
+  fear: "Lo lắng",
+  fearful: "Lo lắng",
+  disgust: "Không hài lòng",
+  contempt: "Không hài lòng",
+};
+
+const AGE_GROUP_LABELS = {
+  all: "Mọi độ tuổi",
+  unknown: "Không xác định",
+};
+
+const toDisplayLabel = (value, labels = {}) => {
+  if (value === null || value === undefined || value === "") return "Chưa có";
+  const key = String(value).trim().toLowerCase();
+  if (labels[key]) return labels[key];
+
+  return key
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const toAgeGroupLabel = (value) => {
+  if (value === null || value === undefined || value === "") return "";
+  const key = String(value).trim().toLowerCase();
+  if (AGE_GROUP_LABELS[key]) return AGE_GROUP_LABELS[key];
+
+  const rangeMatch = key.match(/^(\d+)[_-](\d+)$/);
+  if (rangeMatch) return `${rangeMatch[1]}-${rangeMatch[2]} tuổi`;
+  if (/^\d+\+$/.test(key)) return `${key} tuổi`;
+
+  return toDisplayLabel(key);
+};
+
+const toAgeLabel = (age, ageGroup) => {
+  const roundedAge = Number(age);
+  if (Number.isFinite(roundedAge)) return `${Math.round(roundedAge)} tuổi`;
+  return toAgeGroupLabel(ageGroup) || "Chưa có";
+};
+
 export default function EdgeScanPage() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const streamRef = useRef(null);
 
+  const [hasFaceConsent, setHasFaceConsent] = useState(false);
+  const [showFaceConsentPrompt, setShowFaceConsentPrompt] = useState(true);
   const [cameraReady, setCameraReady] = useState(false);
   const [stage, setStage] = useState("idle"); // idle | scanning | scanned | recommending
   const [error, setError] = useState("");
@@ -24,6 +82,28 @@ export default function EdgeScanPage() {
     return "Sẵn sàng. Hãy nhìn thẳng vào camera và bấm Quét.";
   }, [stage]);
   const [showAiModal, setShowAiModal] = useState(false);
+  const displayAttrs = useMemo(
+    () => ({
+      gender: toDisplayLabel(attrs?.gender, GENDER_LABELS),
+      age: toAgeLabel(attrs?.age, attrs?.age_group),
+      emotion: toDisplayLabel(attrs?.emotion, EMOTION_LABELS),
+      ageGroup: toAgeGroupLabel(attrs?.age_group),
+    }),
+    [attrs]
+  );
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setCameraReady(false);
+  }, []);
 
   useEffect(() => {
     let stream;
@@ -35,6 +115,7 @@ export default function EdgeScanPage() {
           video: { facingMode: "user" },
           audio: false,
         });
+        streamRef.current = stream;
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -46,12 +127,21 @@ export default function EdgeScanPage() {
       }
     };
 
+    if (!hasFaceConsent) {
+      stopCamera();
+      return undefined;
+    }
+
     startCamera();
 
     return () => {
       if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (streamRef.current === stream) {
+        streamRef.current = null;
+        setCameraReady(false);
+      }
     };
-  }, []);
+  }, [hasFaceConsent, stopCamera]);
 
   const captureToFile = async () => {
     const video = videoRef.current;
@@ -94,9 +184,30 @@ export default function EdgeScanPage() {
     };
   };
 
+  const handleAcceptFaceConsent = () => {
+    setHasFaceConsent(true);
+    setShowFaceConsentPrompt(false);
+    setError("");
+  };
+
+  const handleCancelFaceConsent = () => {
+    setError("");
+    navigate("/login");
+  };
+
   const handleScanOnce = async () => {
     setError("");
     setAttrs(null);
+
+    if (!hasFaceConsent) {
+      setShowFaceConsentPrompt(true);
+      return;
+    }
+
+    if (!cameraReady) {
+      setError("Camera đang khởi động, vui lòng thử lại sau vài giây.");
+      return;
+    }
 
     try {
       setStage("scanning");
@@ -120,6 +231,11 @@ export default function EdgeScanPage() {
     if (!attrs) return;
     setError("");
 
+    if (!hasFaceConsent) {
+      setError("Vui lòng đồng ý cho phép xử lý dữ liệu khuôn mặt trước khi nhận gợi ý.");
+      return;
+    }
+
     try {
       setStage("recommending");
 
@@ -135,6 +251,7 @@ export default function EdgeScanPage() {
     setError("");
     setAttrs(null);
     setPreviewUrl("");
+    setShowFaceConsentPrompt(false);
     setStage("idle");
   };
 
@@ -163,35 +280,23 @@ export default function EdgeScanPage() {
             <div className="cameraCard__overlay">
               <div className="cameraCard__frame" />
             </div>
-          </div>
-
-          <div className="cameraCard__actions">
-            <button
-              className="btn btn--ghost"
-              type="button"
-              disabled={!cameraReady || stage === "scanning" || stage === "recommending"}
-              onClick={handleScanOnce}
-            >
-              {stage === "scanning" ? "Đang quét..." : "Quét 1 lượt"}
-            </button>
-
-            <button
-              className="btn btn--secondary"
-              type="button"
-              disabled={!attrs || stage === "scanning" || stage === "recommending"}
-              onClick={handleGetRecommendations}
-            >
-              {stage === "recommending" ? "Đang lấy gợi ý..." : "Nhận gợi ý sản phẩm"}
-            </button>
-
-            <button
-              className="btn btn--ghost"
-              type="button"
-              disabled={stage === "scanning" || stage === "recommending"}
-              onClick={handleReset}
-            >
-              Quét lại
-            </button>
+            {showFaceConsentPrompt && !hasFaceConsent && (
+              <div className="cameraCard__consentPrompt" role="dialog" aria-modal="true">
+                <h3>Đồng ý xử lý dữ liệu khuôn mặt</h3>
+                <p>
+                  Hệ thống sẽ thu thập và xử lý ảnh khuôn mặt để phân tích đặc điểm
+                  và đề xuất sản phẩm phù hợp trong phiên sử dụng này.
+                </p>
+                <div className="cameraCard__consentActions">
+                  <button className="btn btn--primary" type="button" onClick={handleAcceptFaceConsent}>
+                    Đồng ý và bật camera
+                  </button>
+                  <button className="btn btn--ghost" type="button" onClick={handleCancelFaceConsent}>
+                    Không đồng ý
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <canvas ref={canvasRef} className="cameraCard__canvas" />
@@ -210,22 +315,55 @@ export default function EdgeScanPage() {
             <div className="predCard__placeholder">Ảnh chụp sẽ hiện ở đây</div>
           )}
 
-          <div className="predCard__chips">
-            <span className="chip">
-              <b>Giới tính:</b> {attrs?.gender ?? "—"}
-            </span>
-            <span className="chip">
-              <b>Tuổi:</b> {attrs?.age ?? "—"}
-            </span>
-            <span className="chip">
-              <b>Cảm xúc:</b> {attrs?.emotion ?? "—"}
-            </span>
+          <div className="predCard__metrics">
+            <div className={`predMetric ${!attrs ? "predMetric--empty" : ""}`}>
+              <span className="predMetric__label">Giới tính</span>
+              <strong>{displayAttrs.gender}</strong>
+            </div>
+            <div className={`predMetric ${!attrs ? "predMetric--empty" : ""}`}>
+              <span className="predMetric__label">Độ tuổi</span>
+              <strong>{displayAttrs.age}</strong>
+              {attrs?.age_group && <small>{displayAttrs.ageGroup}</small>}
+            </div>
+            <div className={`predMetric ${!attrs ? "predMetric--empty" : ""}`}>
+              <span className="predMetric__label">Cảm xúc</span>
+              <strong>{displayAttrs.emotion}</strong>
+            </div>
+          </div>
+
+          <div className="predCard__actions">
+            <button
+              className="btn btn--ghost"
+              type="button"
+              disabled={(hasFaceConsent && !cameraReady) || stage === "scanning" || stage === "recommending"}
+              onClick={handleScanOnce}
+            >
+              {stage === "scanning" ? "Đang quét..." : "Quét 1 lượt"}
+            </button>
+
+            <button
+              className="btn btn--secondary"
+              type="button"
+              disabled={!hasFaceConsent || !attrs || stage === "scanning" || stage === "recommending"}
+              onClick={handleGetRecommendations}
+            >
+              {stage === "recommending" ? "Đang lấy gợi ý..." : "Nhận gợi ý sản phẩm"}
+            </button>
+
+            <button
+              className="btn btn--ghost"
+              type="button"
+              disabled={stage === "scanning" || stage === "recommending"}
+              onClick={handleReset}
+            >
+              Quét lại
+            </button>
           </div>
 
           {error && <div className="alert">{error}</div>}
 
           <div className="predCard__tip">
-            Mẹo: Đứng nơi đủ sáng, nhìn thẳng, không che mặt.
+            Mẹo: Nhìn thẳng, tháo kính (nếu có) và không che mặt.
           </div>
         </section>
       </div>

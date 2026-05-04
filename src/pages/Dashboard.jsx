@@ -1164,7 +1164,7 @@ const DashboardPage = () => {
 
                 <div className="association-rule-panel">
                   <p>
-                    Hệ thống sẽ lấy dữ liệu giao dịch đã lưu, chạy FP-Growth và cập nhật bảng product_associations với rule dạng A -&gt; B.
+                    He thong lay du lieu giao dich, chay FP-Growth, luu rule goc N -&gt; M roi cache sang bang 1-1 va bang goi y theo gio hang.
                   </p>
 
                   {associationJob.jobId ? (
@@ -1196,12 +1196,16 @@ const DashboardPage = () => {
                         <strong>{formatNumber(associationJob.result.frequent_itemsets)}</strong>
                       </div>
                       <div className="insight-box">
-                        <span>Rules A -&gt; B</span>
+                        <span>Rules 1 -&gt; 1</span>
                         <strong>{formatNumber(associationJob.result.one_to_one_rules ?? 0)}</strong>
                       </div>
                       <div className="insight-box">
-                        <span>Đã lưu</span>
-                        <strong>{formatNumber(associationJob.result.rules_inserted)}</strong>
+                        <span>Rules cart</span>
+                        <strong>{formatNumber(associationJob.result.cart_rules ?? 0)}</strong>
+                      </div>
+                      <div className="insight-box">
+                        <span>Raw rules</span>
+                        <strong>{formatNumber(associationJob.result.raw_rules_inserted ?? associationJob.result.rules_inserted)}</strong>
                       </div>
                     </div>
                   ) : associationJob.running ? (

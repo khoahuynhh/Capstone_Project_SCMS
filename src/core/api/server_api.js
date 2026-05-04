@@ -150,6 +150,11 @@ export const serverApi = {
   relatedProducts: (productId, limit = 5) => {
     return request(`/products/${encodeURIComponent(productId)}/related?limit=${limit}`);
   },
+  cartAssociationRecommendations: (productIds, limit = 5) =>
+    request("/recommendations/cart-associations", {
+      method: "POST",
+      body: JSON.stringify({ product_ids: productIds, limit }),
+    }),
   recommendationEvents: (events) =>
     request("/recommendation-events", {
       method: "POST",

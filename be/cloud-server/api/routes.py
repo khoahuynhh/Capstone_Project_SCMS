@@ -25,6 +25,7 @@ from database.models import (
     Product,
     UserAccount,
     Customer,
+    CartAssociationRule,
     ProductAssociation,
 )
 from services.recommend_service import recommend_products
@@ -124,6 +125,26 @@ class AttributeRecommendationBody(BaseModel):
     emotion: Optional[str] = None
     branch_id: Optional[str] = None
     top_k: int = 20
+
+
+class CartAssociationRecommendationBody(BaseModel):
+    product_ids: List[int]
+    limit: int = 5
+
+    @field_validator("product_ids")
+    @classmethod
+    def validate_product_ids(cls, value: List[int]) -> List[int]:
+        unique_ids = sorted({int(product_id) for product_id in value if product_id})
+        if not unique_ids:
+            raise ValueError("product_ids must contain at least one product id")
+        return unique_ids
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, value: int) -> int:
+        if value < 1 or value > 50:
+            raise ValueError("limit must be between 1 and 50")
+        return value
 
 
 class RecommendationEventCreate(BaseModel):
@@ -480,11 +501,7 @@ def list_transactions(
     if end_date:
         query = query.filter(Transaction.timestamp <= end_date)
 
-    transactions = (
-        query.order_by(desc(Transaction.timestamp))
-        .limit(limit)
-        .all()
-    )
+    transactions = query.order_by(desc(Transaction.timestamp)).limit(limit).all()
 
     return [
         TransactionSummary(
@@ -794,12 +811,13 @@ def create_recommendation_events(
         raise HTTPException(status_code=400, detail="events must not be empty")
 
     if len(body.events) > 200:
-        raise HTTPException(status_code=400, detail="events must contain at most 200 items")
+        raise HTTPException(
+            status_code=400, detail="events must contain at most 200 items"
+        )
 
     product_ids = {event.product_id for event in body.events}
     existing_product_ids = {
-        row[0]
-        for row in db.query(Product.id).filter(Product.id.in_(product_ids)).all()
+        row[0] for row in db.query(Product.id).filter(Product.id.in_(product_ids)).all()
     }
     missing_product_ids = sorted(product_ids - existing_product_ids)
     if missing_product_ids:
@@ -832,7 +850,9 @@ def create_recommendation_events(
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating recommendation events: {e}")
-        raise HTTPException(status_code=400, detail="Could not create recommendation events")
+        raise HTTPException(
+            status_code=400, detail="Could not create recommendation events"
+        )
 
     return {"inserted": len(rows)}
 
@@ -999,44 +1019,152 @@ def list_products(
     ]
 
 
+MIN_SUPPORT = 0.001
+
+
 @router.get("/products/{product_id}/related")
 def get_related_products(
-    product_id: int, limit: int = 5, db: Session = Depends(get_db)  # Hàm get_db của bạn
+    product_id: int, limit: int = 5, db: Session = Depends(get_db)
 ):
     """
     API lấy danh sách các sản phẩm thường được mua kèm với một sản phẩm cụ thể.
     """
-    # Kiểm tra xem sản phẩm gốc có tồn tại không
+    # Check if product exists
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Sản phẩm không tồn tại")
 
-    # Truy vấn các luật kết hợp từ bảng product_associations
+    # Query association rules from product_associations table
     associations = (
         db.query(ProductAssociation)
         .filter(ProductAssociation.product_id == product_id)
-        .filter(ProductAssociation.lift > 1)  # Chỉ lấy các SP có tính bổ trợ (Lift > 1)
+        .filter(ProductAssociation.lift > 1)  # Only select product with Lift > 1
+        .filter(
+            ProductAssociation.support >= MIN_SUPPORT
+        )  # Filter by minimum support threshold
         .order_by(
-            ProductAssociation.lift.desc(),  # Ưu tiên 1: Lift
-            ProductAssociation.confidence.desc(),  # Ưu tiên 2: Confidence
+            ProductAssociation.lift.desc(),  # Priority 1: Lift
+            ProductAssociation.confidence.desc(),  # Priority 2: Confidence
         )
         .limit(limit)
         .all()
     )
 
-    # Nếu không có gợi ý nào, trả về mảng rỗng
+    # If there is no associations, return empty list
     if not associations:
         return []
 
-    # Lấy ra danh sách các sản phẩm chi tiết từ luật kết hợp
-    # Nhờ relationship `related_product` đã setup trong models.py, ta lấy thẳng object Product
+    # Extract a detailed list of products from the association rule.
     recommended_products = [assoc.related_product for assoc in associations]
 
-    # Trả về danh sách (FastAPI sẽ tự động chuyển thành JSON)
+    # Return the list of recommended products (as JSON)
     return recommended_products
 
 
-def _attribute_age_match(product_group: Optional[str], age: Optional[int], age_group: Optional[str]) -> bool:
+@router.post("/recommendations/cart-associations")
+def get_cart_association_recommendations(
+    body: CartAssociationRecommendationBody,
+    db: Session = Depends(get_db),
+):
+    """
+    Recommend products from cached non-1-1 association rules using the whole cart.
+    """
+    cart_product_ids = set(body.product_ids)
+    candidate_rules = (
+        db.query(CartAssociationRule)
+        .filter(CartAssociationRule.antecedent_size <= len(cart_product_ids))
+        .filter(CartAssociationRule.lift > 1)
+        .filter(CartAssociationRule.support >= MIN_SUPPORT)
+        .order_by(
+            CartAssociationRule.antecedent_size.desc(),
+            CartAssociationRule.lift.desc(),
+            CartAssociationRule.confidence.desc(),
+        )
+        .limit(1000)
+        .all()
+    )
+
+    scored_products: dict[int, dict] = {}
+    for rule in candidate_rules:
+        antecedents = {int(product_id) for product_id in rule.antecedent_product_ids}
+        if not antecedents.issubset(cart_product_ids):
+            continue
+
+        for product_id in rule.consequent_product_ids:
+            product_id = int(product_id)
+            if product_id in cart_product_ids:
+                continue
+
+            score = (
+                len(antecedents),
+                float(rule.lift or 0),
+                float(rule.confidence or 0),
+                float(rule.support or 0),
+            )
+            current = scored_products.get(product_id)
+            if current is None or score > current["score"]:
+                scored_products[product_id] = {
+                    "score": score,
+                    "rule": rule,
+                }
+
+    ranked_ids = [
+        product_id
+        for product_id, _ in sorted(
+            scored_products.items(),
+            key=lambda item: item[1]["score"],
+            reverse=True,
+        )
+    ][: body.limit]
+
+    if not ranked_ids:
+        return []
+
+    products = db.query(Product).filter(Product.id.in_(ranked_ids)).all()
+    product_by_id = {product.id: product for product in products}
+
+    response = []
+    for position, product_id in enumerate(ranked_ids, start=1):
+        product = product_by_id.get(product_id)
+        if not product:
+            continue
+        rule = scored_products[product_id]["rule"]
+        response.append(
+            {
+                "id": product.id,
+                "product_code": product.product_code,
+                "name": product.name,
+                "volume": product.volume,
+                "price": float(product.price),
+                "discount_price": product.discount_price,
+                "discount_percent": product.discount_percent,
+                "category": product.category,
+                "stock": product.stock,
+                "description": product.description,
+                "image_url": product.image_url,
+                "emotion": product.emotion,
+                "target_age_group": product.target_age_group,
+                "target_gender": product.target_gender,
+                "usage_context": product.usage_context,
+                "recommendation_rule": {
+                    "rule_id": rule.id,
+                    "source_rule_id": rule.source_rule_id,
+                    "antecedent_product_ids": rule.antecedent_product_ids,
+                    "consequent_product_ids": rule.consequent_product_ids,
+                    "confidence": rule.confidence,
+                    "lift": rule.lift,
+                    "support": rule.support,
+                },
+                "recommendation_position": position,
+            }
+        )
+
+    return response
+
+
+def _attribute_age_match(
+    product_group: Optional[str], age: Optional[int], age_group: Optional[str]
+) -> bool:
     if not product_group or product_group.lower() in {"all", "any", "unisex"}:
         return True
 
@@ -1118,7 +1246,11 @@ def recommend_by_attributes(
             score += 30
             reasons.append("emotion")
 
-        if product.discount_price and product.price and product.discount_price < float(product.price):
+        if (
+            product.discount_price
+            and product.price
+            and product.discount_price < float(product.price)
+        ):
             score += 12
             reasons.append("promotion")
 
