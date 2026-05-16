@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { X, Search, CreditCard, Plus, Minus, Sparkles, User, Brain, ArrowLeft } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
 import { serverApi } from '../../../core/api/server_api';
@@ -37,7 +37,11 @@ const mapDbProductToUi = (p) => {
         targetGender: p.target_gender?.toLowerCase() || 'unisex', // 'male', 'female', 'unisex'
         targetAgeGroup: p.target_age_group || 'all',              // '25_34', '35_44', etc.
         emotion: (p.mood_tag || p.emotion || 'neutral').toLowerCase(), // Lấy từ mood_tag
-        usageContext: p.usage_context || ''                       // 'cooking', 'travel', etc.
+        usageContext: p.usage_context || '',                      // 'cooking', 'travel', etc.
+        recommendationId: p.recommendation_id ?? p.recommendationId ?? null,
+        recommendationSurface: p.recommendation_surface || p.recommendationSurface,
+        recommendationAlgorithm: p.recommendation_algorithm || p.recommendationAlgorithm,
+        recommendationPosition: p.recommendation_position ?? p.recommendationPosition ?? null,
     };
 };
 
@@ -81,6 +85,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const sessionIdRef = useRef(null);
     const trackedImpressionsRef = useRef(new Set());
     const trackedAcceptancesRef = useRef(new Set());
+    const [relatedRecommendationId, setRelatedRecommendationId] = useState(undefined);
 
     if (!sessionIdRef.current && typeof window !== 'undefined') {
         sessionIdRef.current = getRecommendationSessionId();
@@ -99,9 +104,21 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
             gender: aiContext.gender,
             emotion: aiContext.emotion,
             branchId: import.meta.env.VITE_BRANCH_ID || 'HCM_Q1',
+            deviceId: import.meta.env.VITE_DEVICE_ID || 'EDGE_HCM_Q1_01',
+            sessionId: sessionIdRef.current,
             topK: 50,
         })
-            .then((data) => setCloudRecommendations(data?.products || []))
+            .then((data) => {
+                const recommendationId = data?.recommendation_id ?? null;
+                const products = Array.isArray(data?.products) ? data.products : [];
+                setCloudRecommendations(products.map((product, index) => ({
+                    ...product,
+                    recommendation_id: recommendationId,
+                    recommendation_surface: 'face_ai_recommendation',
+                    recommendation_algorithm: 'attribute_ai',
+                    recommendation_position: index + 1,
+                })));
+            })
             .catch((error) => {
                 console.error('Lỗi tải gợi ý theo AI context:', error);
                 setCloudRecommendations([]);
@@ -210,19 +227,59 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
     const formatMoney = (n) => n.toLocaleString('vi-VN') + 'đ';
     const branchId = import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
-    const deviceId = import.meta.env.VITE_DEVICE_ID || null;
+    const deviceId = import.meta.env.VITE_DEVICE_ID || 'EDGE_HCM_Q1_01';
     const emotionLabel = toDisplayLabel(aiContext?.emotion, EMOTION_LABELS);
 
-    const sendRecommendationEvents = (events) => {
+    const mapProductsToBatchPayload = (products) =>
+        products.map((product, index) => ({
+            id: Number(product.id),
+            product_code: product.productCode || product.product_code || '',
+            name: product.name,
+            price: product.finalPrice ?? product.price ?? product.originalPrice ?? 0,
+            category: product.category,
+            recommendation_position: index + 1,
+        }));
+
+    useEffect(() => {
+        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) {
+            setRelatedRecommendationId(undefined);
+            return undefined;
+        }
+
+        let cancelled = false;
+        setRelatedRecommendationId(undefined);
+        serverApi.createRecommendationBatch({
+            branchId,
+            deviceId,
+            sessionId: sessionIdRef.current,
+            surface: 'face_related_products',
+            algorithm: 'association_rules',
+            context: { source_product_id: selectedProduct.id },
+            products: mapProductsToBatchPayload(relatedProducts),
+        })
+            .then((data) => {
+                if (!cancelled) setRelatedRecommendationId(data?.recommendation_id ?? null);
+            })
+            .catch((error) => {
+                console.error('Lỗi tạo related recommendation batch:', error);
+                if (!cancelled) setRelatedRecommendationId(null);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, showPayment, selectedProduct, relatedProducts, branchId, deviceId]);
+
+    const sendRecommendationEvents = useCallback((events) => {
         if (!events.length) return;
         for (let i = 0; i < events.length; i += 100) {
             serverApi.recommendationEvents(events.slice(i, i + 100)).catch((error) => {
-                console.error('Lỗi ghi recommendation event:', error);
+                console.error('Failed to write recommendation event:', error);
             });
         }
-    };
+    }, []);
 
-    const buildRecommendationEvent = (eventType, product, position) => ({
+    const buildRecommendationEvent = useCallback((eventType, product, position) => ({
         event_type: eventType,
         product_id: Number(product.id),
         branch_id: branchId,
@@ -231,6 +288,8 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
         algorithm: product.recommendationAlgorithm || 'attribute_ai',
         position,
         session_id: sessionIdRef.current,
+        recommendation_id: product.recommendationId
+            ?? (product.recommendationSurface === 'face_related_products' ? relatedRecommendationId : null),
         event_metadata: {
             age: aiContext?.age ?? null,
             age_group: aiContext?.age_group ?? null,
@@ -238,7 +297,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
             emotion: aiContext?.emotion ?? null,
             source_product_id: product.sourceProductId ?? null,
         },
-    });
+    }), [aiContext, branchId, deviceId, relatedRecommendationId]);
 
     useEffect(() => {
         if (!isOpen || showPayment || isLoading || loadingRecommendations || displayProducts.length === 0) return;
@@ -253,7 +312,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
         });
 
         sendRecommendationEvents(events);
-    }, [isOpen, showPayment, isLoading, loadingRecommendations, displayProducts, aiContext]);
+    }, [aiContext, buildRecommendationEvent, displayProducts, isLoading, isOpen, loadingRecommendations, sendRecommendationEvents, showPayment]);
 
     const addToCart = (product) => {
         const surface = product.recommendationSurface || 'face_ai_recommendation';
@@ -288,7 +347,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
     };
 
     useEffect(() => {
-        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) return;
+        if (!isOpen || showPayment || !selectedProduct || relatedRecommendationId === undefined || relatedProducts.length === 0) return;
 
         const events = [];
         relatedProducts.forEach((product, index) => {
@@ -305,7 +364,7 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
         });
 
         sendRecommendationEvents(events);
-    }, [isOpen, showPayment, selectedProduct, relatedProducts]);
+    }, [buildRecommendationEvent, isOpen, relatedProducts, relatedRecommendationId, selectedProduct, sendRecommendationEvents, showPayment]);
 
     const handleSelectRelatedProduct = (product, position) => {
         const relatedProduct = {
@@ -364,7 +423,12 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                         </div>
                     </div>
                     {onClose ? (
-                        <button onClick={onClose} className="recoCloseBtn" style={{ color: '#fff', background: 'transparent', border: 'none', cursor: 'pointer' }}>
+                        <button
+                            onClick={onClose}
+                            className="recoCloseBtn"
+                            style={{ color: '#fff', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                            aria-label="Đóng gợi ý AI"
+                        >
                             <X size={24} />
                         </button>
                     ) : null}
@@ -475,11 +539,12 @@ const FaceAIRecommendation = ({ aiContext, isOpen = true, onClose }) => {
                                     onClick={handleGoBack}
                                     title="Quay lại sản phẩm trước"
                                     type="button"
+                                    aria-label="Quay lại sản phẩm trước"
                                 >
                                     <ArrowLeft size={24} />
                                 </button>
                             )}
-                            <button className="recoDetailClose" onClick={() => {
+                            <button className="recoDetailClose" aria-label="Đóng chi tiết sản phẩm" onClick={() => {
                                 setSelectedProduct(null);
                                 setHistoryStack([]);
                             }}>

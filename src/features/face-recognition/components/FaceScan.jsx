@@ -60,6 +60,13 @@ const toAgeLabel = (age, ageGroup) => {
   return toAgeGroupLabel(ageGroup) || "Chưa có";
 };
 
+const toProcessingTimeLabel = (value) => {
+  const ms = Number(value);
+  if (!Number.isFinite(ms)) return "Chưa có";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} giây`;
+};
+
 export default function EdgeScanPage() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
@@ -73,6 +80,7 @@ export default function EdgeScanPage() {
   const [error, setError] = useState("");
 
   const [attrs, setAttrs] = useState(null); // { gender, age, age_group, emotion }
+  const [processingTimeMs, setProcessingTimeMs] = useState(null);
   const [previewUrl, setPreviewUrl] = useState("");
 
   const statusText = useMemo(() => {
@@ -88,8 +96,9 @@ export default function EdgeScanPage() {
       age: toAgeLabel(attrs?.age, attrs?.age_group),
       emotion: toDisplayLabel(attrs?.emotion, EMOTION_LABELS),
       ageGroup: toAgeGroupLabel(attrs?.age_group),
+      processingTime: toProcessingTimeLabel(processingTimeMs),
     }),
-    [attrs]
+    [attrs, processingTimeMs]
   );
 
   const stopCamera = useCallback(() => {
@@ -198,6 +207,7 @@ export default function EdgeScanPage() {
   const handleScanOnce = async () => {
     setError("");
     setAttrs(null);
+    setProcessingTimeMs(null);
 
     if (!hasFaceConsent) {
       setShowFaceConsentPrompt(true);
@@ -217,9 +227,11 @@ export default function EdgeScanPage() {
       // Edge infer: theo edge_api của bạn là identifyFace(file) (multipart)
       const raw = await edgeApi.FaceAnalysis(file);
       const norm = normalizeAttrs(raw);
+      const latencyMs = Number(raw?.latency_ms ?? raw?.processing_time_ms ?? raw?.duration_ms);
 
       if (!norm) throw new Error("Edge API returned invalid attributes.");
       setAttrs(norm);
+      setProcessingTimeMs(Number.isFinite(latencyMs) ? latencyMs : null);
       setStage("scanned");
     } catch (e) {
       setStage("idle");
@@ -250,6 +262,7 @@ export default function EdgeScanPage() {
   const handleReset = () => {
     setError("");
     setAttrs(null);
+    setProcessingTimeMs(null);
     setPreviewUrl("");
     setShowFaceConsentPrompt(false);
     setStage("idle");
@@ -328,6 +341,10 @@ export default function EdgeScanPage() {
             <div className={`predMetric ${!attrs ? "predMetric--empty" : ""}`}>
               <span className="predMetric__label">Cảm xúc</span>
               <strong>{displayAttrs.emotion}</strong>
+            </div>
+            <div className={`predMetric ${processingTimeMs === null ? "predMetric--empty" : ""}`}>
+              <span className="predMetric__label">Thời gian xử lý</span>
+              <strong>{displayAttrs.processingTime}</strong>
             </div>
           </div>
 

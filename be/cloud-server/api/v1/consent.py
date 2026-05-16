@@ -235,7 +235,7 @@ async def delete_customer_data(
             db.query(Recommendation)
             .filter(Recommendation.customer_id == customer_id)
             .update(
-                {"customer_id": "DELETED_USER", "face_attributes": {}},
+                {"customer_id": "DELETED_USER", "recommendation_context": {}},
                 synchronize_session=False,
             )
         )

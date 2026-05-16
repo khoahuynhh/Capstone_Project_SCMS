@@ -30,6 +30,11 @@ export default function Login() {
       await serverApi.login({ email: normalizedEmail, password });
       const userData = await checkSession();
 
+      if (!userData) {
+        setError("Không thể xác thực phiên đăng nhập. Vui lòng thử lại.");
+        return;
+      }
+
       if (userData?.account?.is_admin) {
         navigate("/dashboard", { replace: true, state: { admin: userData } });
         return;
@@ -45,7 +50,7 @@ export default function Login() {
 
   return (
     <div className="login-page">
-      <div className="wrapper">
+      <div className="wrapper login-wrapper">
         <form onSubmit={handleSubmit}>
           <h2>Đăng nhập</h2>
 

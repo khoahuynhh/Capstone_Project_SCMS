@@ -87,14 +87,15 @@ cd be
 docker compose -f docker-compose.edge.yml up -d --build
 ```
 
-docker compose -f docker-compose.edge.yml up -d
-
 Start the UI from the repository root:
 
 ```powershell
 npm install
 npm run dev -- --host
 ```
+
+Read logs:
+docker compose -f docker-compose.edge.yml logs -f edge-device
 
 Open:
 

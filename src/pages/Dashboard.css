@@ -469,6 +469,37 @@
     gap: 12px;
 }
 
+.list-search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 42px;
+    padding: 0 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(37, 99, 235, 0.12);
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ops-muted);
+}
+
+.list-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--ops-text);
+    font: inherit;
+}
+
+.list-search input::placeholder {
+    color: rgba(100, 116, 139, 0.82);
+}
+
+.list-search:focus-within {
+    border-color: rgba(37, 99, 235, 0.32);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
+}
+
 .status-row,
 .transaction-row,
 .branch-table__row,

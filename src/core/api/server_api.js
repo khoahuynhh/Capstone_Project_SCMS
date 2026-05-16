@@ -1,7 +1,19 @@
 const getServerBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_SERVER_API_BASE;
   if (fromEnv && typeof fromEnv === "string") {
-    return fromEnv.replace(/\/$/, "");
+    try {
+      const url = new URL(fromEnv);
+      const currentHost = window.location.hostname;
+      if (
+        ["localhost", "127.0.0.1"].includes(url.hostname) &&
+        ["localhost", "127.0.0.1"].includes(currentHost)
+      ) {
+        url.hostname = currentHost;
+      }
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return fromEnv.replace(/\/$/, "");
+    }
   }
   return "";
 };
@@ -150,17 +162,57 @@ export const serverApi = {
   relatedProducts: (productId, limit = 5) => {
     return request(`/products/${encodeURIComponent(productId)}/related?limit=${limit}`);
   },
-  cartAssociationRecommendations: (productIds, limit = 5) =>
+  cartAssociationRecommendations: (productIds, limit = 5, context = {}) =>
     request("/recommendations/cart-associations", {
       method: "POST",
-      body: JSON.stringify({ product_ids: productIds, limit }),
+      body: JSON.stringify({
+        product_ids: productIds,
+        limit,
+        branch_id: context.branchId,
+        customer_id: context.customerId,
+        device_id: context.deviceId,
+        session_id: context.sessionId,
+      }),
     }),
   recommendationEvents: (events) =>
     request("/recommendation-events", {
       method: "POST",
       body: JSON.stringify({ events }),
     }),
-  recommendationsByAttributes: ({ age, ageGroup, gender, emotion, branchId, topK = 20 } = {}) =>
+  createRecommendationBatch: ({
+    branchId,
+    customerId,
+    deviceId,
+    sessionId,
+    surface,
+    algorithm,
+    context,
+    products,
+  }) =>
+    request("/recommendations/batches", {
+      method: "POST",
+      body: JSON.stringify({
+        branch_id: branchId,
+        customer_id: customerId,
+        device_id: deviceId,
+        session_id: sessionId,
+        surface,
+        algorithm,
+        context,
+        products,
+      }),
+    }),
+  recommendationsByAttributes: ({
+    age,
+    ageGroup,
+    gender,
+    emotion,
+    branchId,
+    customerId,
+    deviceId,
+    sessionId,
+    topK = 20,
+  } = {}) =>
     request("/recommendations/by-attributes", {
       method: "POST",
       body: JSON.stringify({
@@ -169,6 +221,9 @@ export const serverApi = {
         gender,
         emotion,
         branch_id: branchId,
+        customer_id: customerId,
+        device_id: deviceId,
+        session_id: sessionId,
         top_k: topK,
       }),
     }),

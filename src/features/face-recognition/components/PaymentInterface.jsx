@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Banknote,
     Building2,
@@ -56,8 +56,8 @@ const PaymentInterface = ({
     const trackedImpressionsRef = useRef(new Set());
     const sessionIdRef = useRef(getRecommendationSessionId());
 
-    const branchId = import.meta.env.VITE_BRANCH_ID || 'DEFAULT_BRANCH';
-    const deviceId = import.meta.env.VITE_DEVICE_ID || 'DEFAULT_POS';
+    const branchId = import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
+    const deviceId = import.meta.env.VITE_DEVICE_ID || 'EDGE_HCM_Q1_01';
     const eventCustomerId = Number.isFinite(Number(customerId)) ? Number(customerId) : null;
     const orderCode = useMemo(() => `DH${Date.now().toString().slice(-6)}`, []);
 
@@ -70,14 +70,14 @@ const PaymentInterface = ({
         setCheckoutItems(selectedProducts);
     }, [selectedProducts]);
 
-    const sendRecommendationEvents = (events) => {
+    const sendRecommendationEvents = useCallback((events) => {
         if (!events.length) return;
         serverApi.recommendationEvents(events).catch((error) => {
-            console.error('Lỗi ghi recommendation event:', error);
+            console.error('Failed to write recommendation event:', error);
         });
-    };
+    }, []);
 
-    const buildCartRecommendationEvent = (eventType, product, position) => ({
+    const buildCartRecommendationEvent = useCallback((eventType, product, position) => ({
         event_type: eventType,
         product_id: Number(product.id),
         customer_id: eventCustomerId,
@@ -87,10 +87,11 @@ const PaymentInterface = ({
         algorithm: 'association_rules_cart',
         position,
         session_id: sessionIdRef.current,
+        recommendation_id: product.recommendation_id ?? product.recommendationId ?? null,
         event_metadata: {
             rule: product.recommendation_rule || null,
         },
-    });
+    }), [branchId, deviceId, eventCustomerId]);
 
     useEffect(() => {
         const fetchCustomerData = async () => {
@@ -153,9 +154,20 @@ const PaymentInterface = ({
 
         let cancelled = false;
         setCartRecommendationsLoading(true);
-        serverApi.cartAssociationRecommendations(productIds, 5)
-            .then((items) => {
-                if (!cancelled) setCartRecommendations(Array.isArray(items) ? items : []);
+        serverApi.cartAssociationRecommendations(productIds, 5, {
+            branchId,
+            customerId: eventCustomerId,
+            deviceId,
+            sessionId: sessionIdRef.current,
+        })
+            .then((data) => {
+                if (cancelled) return;
+                const recommendationId = data?.recommendation_id ?? null;
+                const items = Array.isArray(data?.products) ? data.products : (Array.isArray(data) ? data : []);
+                setCartRecommendations(items.map((item) => ({
+                    ...item,
+                    recommendation_id: item.recommendation_id ?? recommendationId,
+                })));
             })
             .catch((error) => {
                 console.error('Lỗi khi tải gợi ý theo giỏ hàng:', error);
@@ -168,7 +180,7 @@ const PaymentInterface = ({
         return () => {
             cancelled = true;
         };
-    }, [checkoutItems]);
+    }, [branchId, checkoutItems, deviceId, eventCustomerId]);
 
     useEffect(() => {
         if (cartRecommendations.length === 0) return;
@@ -182,7 +194,7 @@ const PaymentInterface = ({
             events.push(buildCartRecommendationEvent('impression', product, position));
         });
         sendRecommendationEvents(events);
-    }, [cartRecommendations]);
+    }, [buildCartRecommendationEvent, cartRecommendations, sendRecommendationEvents]);
 
     const subtotal = checkoutItems.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity || 0)), 0);
     const tax = subtotal * 0.1;

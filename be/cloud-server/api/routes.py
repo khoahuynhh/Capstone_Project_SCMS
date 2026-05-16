@@ -10,6 +10,7 @@ from fastapi import (
     UploadFile,
     File,
 )
+from fastapi.encoders import jsonable_encoder
 from typing import List, Optional, Dict, Literal
 from datetime import datetime, timedelta
 from pydantic import BaseModel, EmailStr, field_validator
@@ -23,6 +24,8 @@ from database.models import (
     Recommendation,
     RecommendationEvent,
     Product,
+    Store,
+    EdgeDevice,
     UserAccount,
     Customer,
     CartAssociationRule,
@@ -124,12 +127,19 @@ class AttributeRecommendationBody(BaseModel):
     gender: Optional[str] = None
     emotion: Optional[str] = None
     branch_id: Optional[str] = None
+    customer_id: Optional[int] = None
+    device_id: Optional[str] = None
+    session_id: Optional[str] = None
     top_k: int = 20
 
 
 class CartAssociationRecommendationBody(BaseModel):
     product_ids: List[int]
     limit: int = 5
+    branch_id: Optional[str] = None
+    customer_id: Optional[int] = None
+    device_id: Optional[str] = None
+    session_id: Optional[str] = None
 
     @field_validator("product_ids")
     @classmethod
@@ -164,6 +174,17 @@ class RecommendationEventCreate(BaseModel):
 
 class RecommendationEventBulkCreate(BaseModel):
     events: List[RecommendationEventCreate]
+
+
+class RecommendationBatchCreate(BaseModel):
+    branch_id: Optional[str] = None
+    customer_id: Optional[int] = None
+    device_id: Optional[str] = None
+    session_id: Optional[str] = None
+    surface: str
+    algorithm: Optional[str] = None
+    context: Optional[Dict] = None
+    products: List[Dict]
 
 
 class UpdateProfileBody(BaseModel):
@@ -614,7 +635,7 @@ async def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
 
 # Use for customer dashboard
 class PurchaseItem(BaseModel):
-    product_id: str
+    product_id: int
     name: str
     category: Optional[str] = None
     image_url: Optional[str] = None
@@ -653,6 +674,8 @@ def get_purchase_history_grouped(
             Transaction.transaction_id,
             Transaction.timestamp,
             Transaction.branch_id,
+            Transaction.items_count,
+            Transaction.total_amount,
         )
         .join(Customer, Transaction.customer_id == Customer.id)
         .filter(Customer.customer_id == customer_id)
@@ -707,20 +730,25 @@ def get_purchase_history_grouped(
 
     # 4) Build response in order of the invoices
     result: List[PurchaseInvoice] = []
-    for txn_pk, txn_code, ts, branch_id in invoices:
+    for txn_pk, txn_code, ts, branch_id, stored_items_count, stored_total_amount in invoices:
         items = items_by_txn.get(txn_pk, [])
         # giới hạn items mỗi invoice (nếu cần)
         if len(items) > limit_items_per_invoice:
             items = items[:limit_items_per_invoice]
 
-        total_amount = sum(i.line_total for i in items)
+        total_amount = (
+            float(stored_total_amount)
+            if stored_total_amount is not None
+            else sum(i.line_total for i in items)
+        )
+        items_count = stored_items_count if stored_items_count is not None else len(items)
 
         result.append(
             PurchaseInvoice(
                 transaction_id=txn_code,
                 timestamp=ts,
                 branch_id=branch_id,
-                items_count=len(items),
+                items_count=items_count,
                 total_amount=total_amount,
                 items=items,
             )
@@ -855,6 +883,36 @@ def create_recommendation_events(
         )
 
     return {"inserted": len(rows)}
+
+
+@router.post("/recommendations/batches", status_code=status.HTTP_201_CREATED)
+def create_recommendation_batch(
+    body: RecommendationBatchCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a parent recommendation batch and return its id for event tracking."""
+    if not body.products:
+        raise HTTPException(status_code=400, detail="products must not be empty")
+
+    recommendation_id = _record_recommendation_batch(
+        db,
+        branch_id=body.branch_id,
+        device_id=body.device_id,
+        customer_id=body.customer_id,
+        products=body.products,
+        context={
+            **(body.context or {}),
+            "surface": body.surface,
+            "algorithm": body.algorithm,
+            "session_id": body.session_id,
+        },
+    )
+    if recommendation_id is None:
+        raise HTTPException(
+            status_code=400, detail="Could not create recommendation batch"
+        )
+
+    return {"recommendation_id": recommendation_id}
 
 
 @router.get("/recommendations/performance")
@@ -1118,7 +1176,7 @@ def get_cart_association_recommendations(
     ][: body.limit]
 
     if not ranked_ids:
-        return []
+        return {"recommendation_id": None, "products": []}
 
     products = db.query(Product).filter(Product.id.in_(ranked_ids)).all()
     product_by_id = {product.id: product for product in products}
@@ -1159,7 +1217,21 @@ def get_cart_association_recommendations(
             }
         )
 
-    return response
+    recommendation_id = _record_recommendation_batch(
+        db,
+        branch_id=body.branch_id,
+        device_id=body.device_id,
+        customer_id=body.customer_id,
+        products=response,
+        context={
+            "surface": "checkout_cart_associations",
+            "algorithm": "association_rules_cart",
+            "session_id": body.session_id,
+            "source_product_ids": body.product_ids,
+        },
+    )
+
+    return {"recommendation_id": recommendation_id, "products": response}
 
 
 def _attribute_age_match(
@@ -1212,6 +1284,89 @@ def _product_response(p: Product) -> dict:
     }
 
 
+def _resolve_recommendation_context(
+    db: Session,
+    branch_id: Optional[str],
+    device_id: Optional[str],
+    customer_id: Optional[int],
+) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    device = None
+    if device_id:
+        device = db.query(EdgeDevice).filter(EdgeDevice.id == device_id).first()
+
+    if device is None and branch_id:
+        device = (
+            db.query(EdgeDevice)
+            .filter(EdgeDevice.branch_id == branch_id)
+            .order_by(EdgeDevice.id.asc())
+            .first()
+        )
+
+    if device is None:
+        device = db.query(EdgeDevice).order_by(EdgeDevice.id.asc()).first()
+
+    resolved_branch_id = device.branch_id if device else branch_id
+    resolved_device_id = device.id if device else device_id
+
+    if resolved_branch_id:
+        store_exists = (
+            db.query(Store.id).filter(Store.id == resolved_branch_id).first()
+            is not None
+        )
+        if not store_exists:
+            resolved_branch_id = None
+
+    resolved_customer_id = None
+    if customer_id is not None:
+        resolved_customer_id = (
+            customer_id
+            if db.query(Customer.id).filter(Customer.id == customer_id).first()
+            else None
+        )
+
+    return resolved_branch_id, resolved_device_id, resolved_customer_id
+
+
+def _record_recommendation_batch(
+    db: Session,
+    *,
+    branch_id: Optional[str],
+    device_id: Optional[str],
+    customer_id: Optional[int],
+    products: List[dict],
+    context: dict,
+) -> Optional[int]:
+    if not products:
+        return None
+
+    resolved_branch_id, resolved_device_id, resolved_customer_id = (
+        _resolve_recommendation_context(db, branch_id, device_id, customer_id)
+    )
+    if not resolved_branch_id or not resolved_device_id:
+        logger.warning("Skip recommendation batch tracking: missing branch/device")
+        return None
+
+    recommendation = Recommendation(
+        branch_id=resolved_branch_id,
+        transaction_id=context.get("session_id"),
+        customer_id=resolved_customer_id,
+        device_id=resolved_device_id,
+        recommendation_context=jsonable_encoder(context),
+        recommended_products=jsonable_encoder(products),
+        items_count=len(products),
+    )
+
+    try:
+        db.add(recommendation)
+        db.commit()
+        db.refresh(recommendation)
+        return recommendation.id
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating recommendation batch: {e}")
+        return None
+
+
 @router.post("/recommendations/by-attributes")
 def recommend_by_attributes(
     body: AttributeRecommendationBody,
@@ -1262,7 +1417,25 @@ def recommend_by_attributes(
         scored.append((score, -idx, payload))
 
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    products_response = [payload for _score, _idx, payload in scored[:top_k]]
+    recommendation_id = _record_recommendation_batch(
+        db,
+        branch_id=body.branch_id,
+        device_id=body.device_id,
+        customer_id=body.customer_id,
+        products=products_response,
+        context={
+            "surface": "face_ai_recommendation",
+            "algorithm": "attribute_ai",
+            "session_id": body.session_id,
+            "age": body.age,
+            "age_group": body.age_group,
+            "gender": body.gender,
+            "emotion": body.emotion,
+        },
+    )
     return {
+        "recommendation_id": recommendation_id,
         "branch_id": body.branch_id,
         "attributes": {
             "age": body.age,
@@ -1270,7 +1443,7 @@ def recommend_by_attributes(
             "gender": body.gender,
             "emotion": body.emotion,
         },
-        "products": [payload for _score, _idx, payload in scored[:top_k]],
+        "products": products_response,
     }
 
 

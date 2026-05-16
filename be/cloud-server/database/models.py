@@ -204,7 +204,7 @@ class TransactionItem(Base):
 
 
 class Recommendation(Base):
-    """Recommendation events from edge devices"""
+    """Parent record for one generated recommendation batch."""
 
     __tablename__ = "recommendations"
 
@@ -217,8 +217,8 @@ class Recommendation(Base):
         String(50), ForeignKey("edge_devices.id"), index=True, nullable=False
     )
 
-    # Customer attributes
-    face_attributes = Column(JSON)  # Demographics, age, gender, etc.
+    # Request/session context used to generate the recommendation batch.
+    recommendation_context = Column(JSON)
 
     # Recommendations
     recommended_products = Column(JSON)  # List of recommended products

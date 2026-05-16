@@ -65,10 +65,11 @@ class EdgeSettings(BaseSettings):
     CAMERA_MOCK: bool = Field(default=True)  # Use mock camera for simulation
     
     # Face Detection
+    FACE_PREPROCESSING_ENABLED: bool = Field(default=False)
     FACE_DETECTION_ENABLED: bool = Field(default=True)
     FACE_MIN_SIZE: int = Field(default=50)
     FACE_DETECTION_CONFIDENCE: float = Field(default=0.7)
-    FACE_DETECTION_MODEL_PATH: str = Field(default="./models/face_detector.onnx")
+    FACE_DETECTION_MODEL_PATH: str = Field(default="")
     
     # Recommendation
     RECOMMENDATION_ENABLED: bool = Field(default=True)
@@ -78,6 +79,7 @@ class EdgeSettings(BaseSettings):
     
     # Model Management
     MODEL_STORAGE_PATH: str = Field(default="./models")
+    FACE_ATTR_MODEL_FILE: str = Field(default="best_model_v2_embedder.onnx")
     MODEL_AUTO_UPDATE: bool = Field(default=True)
     MODEL_UPDATE_CHECK_INTERVAL: int = Field(default=3600)  # 1 hour
     

@@ -6,17 +6,18 @@ import {
 } from 'lucide-react';
 import '../css/CustomerProfile.css';
 
-const CustomerProfile = ({ customer }) => {
+const CustomerProfile = ({ customer, historyRefreshKey = 0 }) => {
     const [history, setHistory] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [selectedInvoice, setSelectedInvoice] = useState(null);
     const [formData, setFormData] = useState({ ...customer });
 
     useEffect(() => {
         const fetchHistory = async () => {
             try {
                 const res = await serverApi.purchaseHistory(customer.customer_id);
-                setHistory(res);
+                setHistory(Array.isArray(res) ? res : []);
             } catch (err) {
                 console.error("Lỗi lấy lịch sử:", err);
             } finally {
@@ -24,7 +25,7 @@ const CustomerProfile = ({ customer }) => {
             }
         };
         if (customer?.customer_id) fetchHistory();
-    }, [customer]);
+    }, [customer, historyRefreshKey]);
 
     useEffect(() => {
         if (customer) {
@@ -43,6 +44,19 @@ const CustomerProfile = ({ customer }) => {
     };
 
     if (!customer) return <div className="loader">Đang tải dữ liệu...</div>;
+
+    const formatCurrency = (value) => (
+        new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(Number(value) || 0)
+    );
+
+    const formatDateTime = (value) => {
+        if (!value) return '--';
+        const date = new Date(value);
+        return `${date.toLocaleDateString('vi-VN')} ${date.toLocaleTimeString('vi-VN', {
+            hour: '2-digit',
+            minute: '2-digit',
+        })}`;
+    };
 
     return (
         <div className="profile-wrapper animate-slide-up">
@@ -120,7 +134,12 @@ const CustomerProfile = ({ customer }) => {
                             <div className="loading-placeholder">Đang tải dữ liệu...</div>
                         ) : history.length > 0 ? (
                             history.map((inv) => (
-                                <div key={inv.transaction_id} className="history-item">
+                                <button
+                                    key={inv.transaction_id}
+                                    className="history-item"
+                                    type="button"
+                                    onClick={() => setSelectedInvoice(inv)}
+                                >
                                     <div className="item-icon-wrapper">
                                         <Clock size={18} />
                                     </div>
@@ -136,7 +155,7 @@ const CustomerProfile = ({ customer }) => {
                                         </div>
                                     </div>
                                     <ChevronRight size={18} className="action-arrow" />
-                                </div>
+                                </button>
                             ))
                         ) : (
                             <div className="empty-history">
@@ -147,6 +166,52 @@ const CustomerProfile = ({ customer }) => {
                     </div>
                 </div>
             </div>
+            {selectedInvoice && (
+                <div className="modal-overlay">
+                    <div className="modal-content invoice-detail-modal glass-card animate-scale-in">
+                        <div className="modal-header">
+                            <div>
+                                <h3>Chi tiết hóa đơn</h3>
+                                <p className="invoice-detail-subtitle">
+                                    #{selectedInvoice.transaction_id} • {formatDateTime(selectedInvoice.timestamp)}
+                                </p>
+                            </div>
+                            <button onClick={() => setSelectedInvoice(null)} type="button">
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <div className="invoice-detail-summary">
+                            <div>
+                                <span>Chi nhánh</span>
+                                <strong>{selectedInvoice.branch_id || '--'}</strong>
+                            </div>
+                            <div>
+                                <span>Số sản phẩm</span>
+                                <strong>{selectedInvoice.items_count || 0}</strong>
+                            </div>
+                            <div>
+                                <span>Tổng tiền</span>
+                                <strong>{formatCurrency(selectedInvoice.total_amount)}</strong>
+                            </div>
+                        </div>
+
+                        <div className="invoice-detail-items">
+                            {(selectedInvoice.items || []).map((item, index) => (
+                                <div className="invoice-detail-item" key={`${selectedInvoice.transaction_id}-${item.product_id}-${index}`}>
+                                    <img src={item.image_url || '/placeholder-prod.png'} alt={item.name} />
+                                    <div>
+                                        <strong>{item.name}</strong>
+                                        <span>{item.category || 'Khác'}</span>
+                                        <small>{item.qty} x {formatCurrency(item.unit_price)}</small>
+                                    </div>
+                                    <b>{formatCurrency(item.line_total)}</b>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
             {isModalOpen && (
                 <div className="modal-overlay">
                     <div className="modal-content glass-card animate-scale-in">

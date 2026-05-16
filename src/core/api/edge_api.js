@@ -1,6 +1,20 @@
 const getEdgeBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_EDGE_API_BASE;
-  if (fromEnv && typeof fromEnv === "string") return fromEnv.replace(/\/$/, "");
+  if (fromEnv && typeof fromEnv === "string") {
+    try {
+      const url = new URL(fromEnv);
+      const currentHost = window.location.hostname;
+      if (
+        ["localhost", "127.0.0.1"].includes(url.hostname) &&
+        ["localhost", "127.0.0.1"].includes(currentHost)
+      ) {
+        url.hostname = currentHost;
+      }
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      return fromEnv.replace(/\/$/, "");
+    }
+  }
   return "";
 };
 

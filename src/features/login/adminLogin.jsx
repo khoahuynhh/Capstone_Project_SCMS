@@ -49,7 +49,7 @@ export default function AdminLogin() {
 
   return (
     <div className="login-page">
-      <div className="wrapper">
+      <div className="wrapper login-wrapper admin-wrapper">
         <form onSubmit={handleSubmit}>
           {/* Đổi tiêu đề để phân biệt */}
           <h2 style={{ color: "#d32f2f" }}>Đăng nhập</h2>

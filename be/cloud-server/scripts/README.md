@@ -40,6 +40,34 @@ Useful environment variables:
 - `SEED_INCLUDE_PROMOTIONS`
 - `RESET_DB`: `true` or `false`
 
+## `create_admin.py`
+
+Create the first system admin account, or promote an existing account to admin.
+This is the bootstrap path for the `/admin-login` UI.
+
+Interactive password prompt:
+
+```powershell
+python be\cloud-server\scripts\create_admin.py --email admin@example.com
+```
+
+Using environment variables:
+
+```powershell
+$env:ADMIN_EMAIL="admin@example.com"
+$env:ADMIN_PASSWORD="change-this-password"
+python be\cloud-server\scripts\create_admin.py
+```
+
+If the account already exists, the script sets `is_admin=true` and leaves the
+existing password unchanged. To replace the password too:
+
+```powershell
+$env:ADMIN_EMAIL="admin@example.com"
+$env:ADMIN_PASSWORD="new-admin-password"
+python be\cloud-server\scripts\create_admin.py --reset-password
+```
+
 ## `export_postgres.py`
 
 Create a PostgreSQL backup from the running `postgres-db` Docker container using `pg_dump`.

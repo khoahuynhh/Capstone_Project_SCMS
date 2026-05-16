@@ -191,7 +191,10 @@ class MQTTSubscriber:
                 transaction_id=data.get("transaction_id"),
                 timestamp=datetime.fromisoformat(data["timestamp"]),
                 customer_id=data.get("customer_id"),
-                face_attributes=data.get("face_attributes", {}),
+                recommendation_context=data.get(
+                    "recommendation_context",
+                    data.get("face_attributes", {}),
+                ),
                 recommended_products=data.get("recommendations", []),
                 items_count=len(data.get("recommendations", [])),
             )

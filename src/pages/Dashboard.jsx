@@ -13,6 +13,7 @@ import {
   MonitorCog,
   Package,
   RefreshCcw,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -77,10 +78,22 @@ const buildSnapshot = ({ overview }) => ({
 const formatPeriodLabel = (days) => `${days} ngày`;
 const ASSOCIATION_JOB_STORAGE_KEY = 'dashboard.associationJobId';
 const RECOMMENDATION_ALGORITHM_LABELS = {
-  purchase_history_sort: 'Lich su mua',
-  attribute_ai: 'AI khuon mat',
-  association_rules: 'Luat ket hop',
-  unknown: 'Khong xac dinh',
+  purchase_history_sort: 'Lịch sử mua',
+  attribute_ai: 'AI khuôn mặt',
+  association_rules: 'Luật kết hợp',
+  seed_hybrid: 'Dữ liệu mẫu tổng hợp',
+  unknown: 'Không xác định',
+};
+
+const normalizeSearchText = (value) => String(value ?? '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase();
+
+const matchesSearch = (query, values) => {
+  const normalizedQuery = normalizeSearchText(query).trim();
+  if (!normalizedQuery) return true;
+  return values.some((value) => normalizeSearchText(value).includes(normalizedQuery));
 };
 
 const getAssociationJobStatusLabel = (status) => {
@@ -246,6 +259,16 @@ const DashboardPage = () => {
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedBranchId, setSelectedBranchId] = useState('');
   const [selectedDays, setSelectedDays] = useState(30);
+  const [listSearch, setListSearch] = useState({
+    inventoryBranches: '',
+    inventoryItems: '',
+    algorithms: '',
+    topProducts: '',
+    branches: '',
+    customerSegments: '',
+    inventoryAlerts: '',
+    categories: '',
+  });
   const [associationJob, setAssociationJob] = useState({
     running: Boolean(window.localStorage.getItem(ASSOCIATION_JOB_STORAGE_KEY)),
     jobId: window.localStorage.getItem(ASSOCIATION_JOB_STORAGE_KEY) || '',
@@ -419,6 +442,61 @@ const DashboardPage = () => {
     };
   }, [dashboardState, selectedBranchId]);
 
+  const filteredLists = useMemo(() => ({
+    inventoryBranches: derived.branchInventoryBranches.filter((branch) => matchesSearch(
+      listSearch.inventoryBranches,
+      [branch.branch_name, branch.branch_id],
+    )),
+    inventoryItems: derived.branchInventoryItems.filter((item) => matchesSearch(
+      listSearch.inventoryItems,
+      [item.product_name, item.category, item.branch_name, item.branch_id, item.product_id, item.status],
+    )),
+    algorithms: derived.recommendationAlgorithmPerformance.filter((item) => matchesSearch(
+      listSearch.algorithms,
+      [RECOMMENDATION_ALGORITHM_LABELS[item.algorithm], item.algorithm],
+    )),
+    topProducts: derived.topProducts.filter((product) => matchesSearch(
+      listSearch.topProducts,
+      [product.product_name, product.category, product.product_id],
+    )),
+    branches: derived.branchPerformance.filter((branch) => matchesSearch(
+      listSearch.branches,
+      [branch.branch_name, branch.branch_id],
+    )),
+    customerSegments: derived.customerSegments.filter((segment) => matchesSearch(
+      listSearch.customerSegments,
+      [segment.segment],
+    )),
+    inventoryAlerts: derived.inventoryAlerts.filter((item) => matchesSearch(
+      listSearch.inventoryAlerts,
+      [item.product_name, item.branch_name, item.branch_id, item.status],
+    )),
+    categories: derived.categoryBreakdown.filter((category) => matchesSearch(
+      listSearch.categories,
+      [category.category],
+    )),
+  }), [derived, listSearch]);
+
+  const handleListSearchChange = (key) => (event) => {
+    setListSearch((current) => ({
+      ...current,
+      [key]: event.target.value,
+    }));
+  };
+
+  const renderSearchInput = (key, placeholder) => (
+    <label className="list-search">
+      <Search size={16} />
+      <input
+        type="search"
+        value={listSearch[key]}
+        onChange={handleListSearchChange(key)}
+        placeholder={placeholder}
+        aria-label={placeholder}
+      />
+    </label>
+  );
+
   const topBranch = derived.branchPerformance?.[0] ?? null;
   const inventoryScopeLabel = selectedBranchId || 'Toàn chuỗi';
 
@@ -488,7 +566,7 @@ const DashboardPage = () => {
         ...current,
         running: false,
         status: 'failed',
-        error: error?.message || 'Khong the tao lai luat goi y san pham',
+        error: error?.message || 'Không thể tạo lại luật gợi ý sản phẩm',
       }));
     }
   };
@@ -698,7 +776,8 @@ const DashboardPage = () => {
 
               <div className="inventory-layout">
                 <div className="inventory-branch-list">
-                  {derived.branchInventoryBranches.length ? derived.branchInventoryBranches.map((branch) => (
+                  {renderSearchInput('inventoryBranches', 'Tìm chi nhánh')}
+                  {filteredLists.inventoryBranches.length ? filteredLists.inventoryBranches.map((branch) => (
                     <div key={branch.branch_id} className="inventory-branch-row">
                       <div>
                         <strong>{branch.branch_name || branch.branch_id}</strong>
@@ -715,6 +794,7 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="inventory-table">
+                  {renderSearchInput('inventoryItems', 'Tìm sản phẩm, danh mục, chi nhánh')}
                   <div className="inventory-table__head">
                     <span>Sản phẩm</span>
                     <span>Chi nhánh</span>
@@ -724,7 +804,7 @@ const DashboardPage = () => {
                     <span>Trạng thái</span>
                   </div>
 
-                  {derived.branchInventoryItems.length ? derived.branchInventoryItems.map((item) => (
+                  {filteredLists.inventoryItems.length ? filteredLists.inventoryItems.map((item) => (
                     <div key={`${item.branch_id}-${item.product_id}`} className="inventory-table__row">
                       <span>
                         <strong>{item.product_name}</strong>
@@ -751,13 +831,14 @@ const DashboardPage = () => {
               <div className="panel-card__header">
                 <div>
                   <span className="eyebrow">Recommendation performance</span>
-                  <h2>Hieu qua theo tung thuat toan goi y</h2>
+                  <h2>Hiệu suất thuật toán gợi ý</h2>
                 </div>
               </div>
 
               <div className="recommendation-table">
+                {renderSearchInput('algorithms', 'Tìm thuật toán')}
                 <div className="recommendation-table__head">
-                  <span>Thuat toan</span>
+                  <span>Thuật toán</span>
                   <span>Impressions</span>
                   <span>Clicks</span>
                   <span>Accepts</span>
@@ -765,8 +846,8 @@ const DashboardPage = () => {
                   <span>Acceptance</span>
                 </div>
 
-                {derived.recommendationAlgorithmPerformance.length ? (
-                  derived.recommendationAlgorithmPerformance.map((item) => (
+                {filteredLists.algorithms.length ? (
+                  filteredLists.algorithms.map((item) => (
                     <div key={item.algorithm} className="recommendation-table__row">
                       <span>{RECOMMENDATION_ALGORITHM_LABELS[item.algorithm] || item.algorithm}</span>
                       <span>{formatNumber(item.impressions)}</span>
@@ -777,7 +858,7 @@ const DashboardPage = () => {
                     </div>
                   ))
                 ) : (
-                  <div className="empty-state">Chua co du lieu tu recommendation events.</div>
+                  <div className="empty-state">Chưa có dữ liệu recommendation events.</div>
                 )}
               </div>
             </section>
@@ -897,7 +978,8 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="transaction-feed">
-                  {derived.topProducts.length ? derived.topProducts.map((product) => (
+                  {renderSearchInput('topProducts', 'Tìm sản phẩm hoặc danh mục')}
+                  {filteredLists.topProducts.length ? filteredLists.topProducts.map((product) => (
                     <div key={product.product_id} className="transaction-row">
                       <div>
                         <strong>{product.product_name}</strong>
@@ -925,6 +1007,7 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="branch-table">
+                  {renderSearchInput('branches', 'Tìm chi nhánh')}
                   <div className="branch-table__head">
                     <span>Chi nhánh</span>
                     <span>Giao dịch</span>
@@ -932,7 +1015,7 @@ const DashboardPage = () => {
                     <span>Tỷ lệ chuyển đổi</span>
                   </div>
 
-                  {derived.branchPerformance.length ? derived.branchPerformance.map((branch) => (
+                  {filteredLists.branches.length ? filteredLists.branches.map((branch) => (
                     <div key={branch.branch_id} className="branch-table__row">
                       <span>{branch.branch_name || branch.branch_id}</span>
                       <span>{formatNumber(branch.transactions)}</span>
@@ -954,7 +1037,8 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="transaction-feed">
-                  {derived.customerSegments.length ? derived.customerSegments.map((segment, index) => (
+                  {renderSearchInput('customerSegments', 'Tìm phân khúc khách hàng')}
+                  {filteredLists.customerSegments.length ? filteredLists.customerSegments.map((segment, index) => (
                     <div key={`${segment.segment}-${index}`} className="transaction-row">
                       <div>
                         <strong>{segment.segment}</strong>
@@ -982,7 +1066,8 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="transaction-feed">
-                  {derived.inventoryAlerts.length ? derived.inventoryAlerts.map((item) => (
+                  {renderSearchInput('inventoryAlerts', 'Tìm sản phẩm hoặc chi nhánh')}
+                  {filteredLists.inventoryAlerts.length ? filteredLists.inventoryAlerts.map((item) => (
                     <div key={`${item.branch_id}-${item.product_id}`} className="transaction-row">
                       <div>
                         <strong>{item.product_name}</strong>
@@ -1008,7 +1093,8 @@ const DashboardPage = () => {
                 </div>
 
                 <div className="transaction-feed">
-                  {derived.categoryBreakdown.length ? derived.categoryBreakdown.map((category, index) => (
+                  {renderSearchInput('categories', 'Tìm danh mục')}
+                  {filteredLists.categories.length ? filteredLists.categories.map((category, index) => (
                     <div key={`${category.category}-${index}`} className="transaction-row">
                       <div>
                         <strong>{category.category}</strong>
@@ -1164,7 +1250,7 @@ const DashboardPage = () => {
 
                 <div className="association-rule-panel">
                   <p>
-                    He thong lay du lieu giao dich, chay FP-Growth, luu rule goc N -&gt; M roi cache sang bang 1-1 va bang goi y theo gio hang.
+                    Tính năng này sẽ chạy thuật toán trên dữ liệu giao dịch lịch sử để tạo ra các luật gợi ý sản phẩm. Tùy vào khối lượng dữ liệu, quá trình này có thể mất vài phút và sẽ chạy nền để không ảnh hưởng đến hiệu suất hệ thống.
                   </p>
 
                   {associationJob.jobId ? (
@@ -1273,4 +1359,3 @@ const DashboardPage = () => {
 };
 
 export default DashboardPage;
-

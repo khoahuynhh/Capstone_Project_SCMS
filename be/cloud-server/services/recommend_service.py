@@ -11,6 +11,7 @@ from database.models import (
     PromotionBranch,
     PromotionProduct,
     BranchInventory,
+    Customer,
 )
 
 
@@ -46,16 +47,26 @@ def get_personal_scores(
     Uses Transaction + TransactionItem.
     """
     since = _now() - timedelta(days=days)
+    resolved_customer_id = None
+    raw_customer_id = str(customer_id).strip()
+    customer = db.query(Customer).filter(Customer.customer_id == raw_customer_id).first()
+    if customer:
+        resolved_customer_id = customer.id
+    elif raw_customer_id.isdigit():
+        resolved_customer_id = int(raw_customer_id)
+
+    if resolved_customer_id is None:
+        return {}
 
     rows = (
         db.query(
             Product.id.label("product_pk"),
             func.coalesce(func.sum(TransactionItem.qty), 0).label("qty_sum"),
         )
-        .join(TransactionItem, TransactionItem.product_id == Product.product_id)
+        .join(TransactionItem, TransactionItem.product_id == Product.id)
         .join(Transaction, TransactionItem.transaction_id == Transaction.id)
         .filter(
-            Transaction.customer_id == customer_id,
+            Transaction.customer_id == resolved_customer_id,
             Transaction.timestamp >= since,
         )
         .group_by(Product.id)
@@ -86,25 +97,13 @@ def get_basket_scores(
 
     since = _now() - timedelta(days=days)
 
-    # Map seed product PK -> product_id (string) to match TransactionItem.product_id
-    seed_product_ids = [
-        pid
-        for (pid,) in db.query(Product.product_id)
-        .filter(Product.id.in_(seed_product_pks))
-        .all()
-    ]
-    seed_product_ids = [x for x in seed_product_ids if x]
-
-    if not seed_product_ids:
-        return {}
-
     # Find recent transactions that contain seed products
     tx_ids = (
         db.query(TransactionItem.transaction_id)
         .join(Transaction, TransactionItem.transaction_id == Transaction.id)
         .filter(
             Transaction.timestamp >= since,
-            TransactionItem.product_id.in_(seed_product_ids),
+            TransactionItem.product_id.in_(seed_product_pks),
         )
         .group_by(TransactionItem.transaction_id)
         .order_by(func.max(Transaction.timestamp).desc())
@@ -121,7 +120,7 @@ def get_basket_scores(
             Product.id.label("product_pk"),
             func.count(TransactionItem.id).label("cnt"),
         )
-        .join(TransactionItem, TransactionItem.product_id == Product.product_id)
+        .join(TransactionItem, TransactionItem.product_id == Product.id)
         .filter(TransactionItem.transaction_id.in_(tx_ids))
         .group_by(Product.id)
         .order_by(func.count(TransactionItem.id).desc())
@@ -273,7 +272,7 @@ def recommend_products(
         out.append(
             {
                 "product_pk": pk,
-                "product_id": p.product_id,
+                "product_id": p.product_code,
                 "name": p.name,
                 "category": p.category,
                 "price": p.price,

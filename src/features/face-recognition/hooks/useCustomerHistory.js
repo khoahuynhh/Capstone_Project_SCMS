@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
-import { serverApi } from '../../../core/api/server_api'; // Chỉnh lại đường dẫn import cho đúng
+import { serverApi } from '../../../core/api/server_api';
 
-export const useCustomerHistory = (customerId) => {
+export const useCustomerHistory = (customerId, refreshKey = 0) => {
     const [historyInvoices, setHistoryInvoices] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -9,28 +9,40 @@ export const useCustomerHistory = (customerId) => {
     useEffect(() => {
         if (!customerId) {
             setHistoryInvoices([]);
-            return;
+            setError(null);
+            return undefined;
         }
+
+        let cancelled = false;
 
         const fetchHistory = async () => {
             setIsLoading(true);
+            setError(null);
+
             try {
-                // Gọi API lấy lịch sử mua hàng của khách
-                // server_api.js của bạn đã có hàm purchaseHistory(id, options)
                 const data = await serverApi.purchaseHistory(customerId, { limitInvoices: 20 });
-                
-                // Lưu dữ liệu vào state
-                setHistoryInvoices(data || []);
+                if (!cancelled) {
+                    setHistoryInvoices(Array.isArray(data) ? data : []);
+                }
             } catch (err) {
-                console.error("Lỗi tải lịch sử mua hàng:", err);
-                setError(err);
+                if (!cancelled) {
+                    console.error('Loi tai lich su mua hang:', err);
+                    setError(err);
+                    setHistoryInvoices([]);
+                }
             } finally {
-                setIsLoading(false);
+                if (!cancelled) {
+                    setIsLoading(false);
+                }
             }
         };
 
         fetchHistory();
-    }, [customerId]);
+
+        return () => {
+            cancelled = true;
+        };
+    }, [customerId, refreshKey]);
 
     return { historyInvoices, isLoading, error };
 };

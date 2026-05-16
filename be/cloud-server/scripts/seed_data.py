@@ -1,10 +1,16 @@
 import csv
 import os
 import random
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CLOUD_SERVER_DIR = SCRIPT_DIR.parent
+if str(CLOUD_SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(CLOUD_SERVER_DIR))
 
 from passlib.context import CryptContext
 from sqlalchemy import create_engine, text
@@ -35,14 +41,13 @@ from database.models import (
     PromotionBranch,
     PromotionProduct,
     Recommendation,
+    RecommendationEvent,
     Store,
     Transaction,
     TransactionItem,
     UserAccount,
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-CLOUD_SERVER_DIR = SCRIPT_DIR.parent
 DEFAULT_PRODUCT_CSV_PATH = CLOUD_SERVER_DIR / "data" / "Products.csv"
 
 DATABASE_URL = os.getenv(
@@ -83,15 +88,15 @@ def load_seed_config() -> SeedConfig:
     profiles = {
         "render_free": SeedConfig(
             profile="render_free",
-            max_products=80,
+            max_products=160,
             customer_count=24,
-            transaction_count=72,
+            transaction_count=96,
             recommendation_per_tx_min=1,
-            recommendation_per_tx_max=3,
-            max_items_per_tx=3,
-            max_assoc_products_per_category=5,
+            recommendation_per_tx_max=5,
+            max_items_per_tx=5,
+            max_assoc_products_per_category=8,
             assoc_links_per_product=2,
-            promotion_product_count=6,
+            promotion_product_count=10,
             performance_days=3,
             ab_event_count=18,
             fl_round_count=2,
@@ -240,11 +245,20 @@ AGE_GROUPS = ["18_24", "25_34", "35_44", "45_54"]
 GENDERS = ["male", "female", "unisex"]
 FAVORITE_CATEGORIES = [
     "Snack",
-    "Beverage",
-    "Dairy",
-    "Spice",
-    "Personal Care",
+    "Nước giải khát",
+    "Sữa & chế phẩm",
+    "Gia vị",
+    "Chăm sóc cá nhân",
 ]
+DEMO_BUNDLE_CATEGORY_GROUPS = [
+    ["Mì / Bún / Phở", "Snack", "Nước giải khát"],
+    ["Dầu ăn", "Gia vị", "Rau gia vị"],
+    ["Sữa & chế phẩm", "Snack", "Nước giải khát"],
+    ["Chăm sóc cá nhân", "Hóa phẩm tẩy rửa", "Sản phẩm giấy"],
+    ["Đồ uống có cồn", "Snack", "Nước giải khát"],
+    ["Văn phòng phẩm", "Pin", "Phụ kiện điện"],
+]
+DEMO_EMOTIONS = ["neutral", "happy", "tired", "anger", "sad", "fear"]
 
 
 def rand_bool(probability: float = 0.5) -> bool:
@@ -301,6 +315,29 @@ def load_product_rows(limit: int) -> list[dict]:
     return rows[:limit]
 
 
+def build_demo_bundles(products, max_per_category: int = 3) -> list[list]:
+    by_category = {}
+    for product in products:
+        by_category.setdefault(product.category or "General", []).append(product)
+
+    bundles = []
+    for category_group in DEMO_BUNDLE_CATEGORY_GROUPS:
+        bundle = []
+        for category in category_group:
+            candidates = by_category.get(category, [])
+            if not candidates:
+                continue
+            bundle.extend(candidates[:max_per_category])
+        if len(bundle) >= 3:
+            bundles.append(bundle)
+
+    for category, candidates in by_category.items():
+        if len(candidates) >= 3:
+            bundles.append(candidates[: min(max_per_category + 2, len(candidates))])
+
+    return bundles
+
+
 def seed_stores_and_devices(db):
     stores = [
         Store(id="HCM_Q1", name="Mart Quan 1", address="12 Nguyen Hue, Quan 1, HCM"),
@@ -348,7 +385,7 @@ def seed_products_from_csv(db, config: SeedConfig):
     rows = load_product_rows(config.max_products)
     products = []
 
-    for row in rows:
+    for index, row in enumerate(rows):
         base_price = parse_decimal(row.get("price"), "0")
         has_discount = rand_bool(0.25)
         discount_percent = random.choice([5, 10, 15]) if has_discount else None
@@ -366,6 +403,18 @@ def seed_products_from_csv(db, config: SeedConfig):
 
         category = nullable_str(row.get("category")) or "General"
 
+        target_gender = nullable_str(row.get("target_gender"))
+        if not target_gender or target_gender == "unisex":
+            target_gender = ["unisex", "female", "male", "unisex"][index % 4]
+
+        target_age_group = nullable_str(row.get("target_age_group"))
+        if not target_age_group:
+            target_age_group = AGE_GROUPS[index % len(AGE_GROUPS)]
+
+        emotion = nullable_str(row.get("mood_tag"))
+        if not emotion or emotion == "neutral":
+            emotion = DEMO_EMOTIONS[index % len(DEMO_EMOTIONS)]
+
         products.append(
             Product(
                 product_code=str(row.get("product_code") or f"P{len(products) + 1:05d}"),
@@ -378,9 +427,9 @@ def seed_products_from_csv(db, config: SeedConfig):
                 stock=stock,
                 description=f"{category} product for demo data.",
                 image_url=nullable_str(row.get("image_url")),
-                emotion=nullable_str(row.get("mood_tag")),
-                target_age_group=nullable_str(row.get("target_age_group")),
-                target_gender=nullable_str(row.get("target_gender")),
+                emotion=emotion,
+                target_age_group=target_age_group,
+                target_gender=target_gender,
                 usage_context=nullable_str(row.get("usage_context")),
             )
         )
@@ -416,6 +465,70 @@ def seed_product_associations(db, products, config: SeedConfig):
 
     associations = {}
     cart_rules = []
+
+    def add_seed_rule(antecedents, consequents, confidence, lift, support):
+        raw_rule = AssociationRuleRaw(
+            antecedent_product_ids=sorted({product.id for product in antecedents}),
+            consequent_product_ids=sorted({product.id for product in consequents}),
+            antecedent_size=len({product.id for product in antecedents}),
+            consequent_size=len({product.id for product in consequents}),
+            confidence=confidence,
+            lift=lift,
+            support=support,
+            algorithm="seed",
+            is_active=True,
+        )
+        db.add(raw_rule)
+        db.flush()
+        return raw_rule
+
+    for bundle in build_demo_bundles(products):
+        top_items = bundle[: min(len(bundle), 6)]
+
+        for index, product in enumerate(top_items):
+            related_candidates = [
+                item for item in top_items if item.id != product.id
+            ][:3]
+            for related in related_candidates:
+                raw_rule = add_seed_rule(
+                    [product],
+                    [related],
+                    confidence=round(random.uniform(0.62, 0.92), 2),
+                    lift=round(random.uniform(1.35, 2.8), 2),
+                    support=round(random.uniform(0.08, 0.22), 3),
+                )
+                associations[(product.id, related.id)] = ProductAssociation(
+                    source_rule_id=raw_rule.id,
+                    product_id=product.id,
+                    related_product_id=related.id,
+                    confidence=raw_rule.confidence,
+                    lift=raw_rule.lift,
+                    support=raw_rule.support,
+                )
+
+            if index + 2 < len(top_items):
+                antecedents = top_items[index : index + 2]
+                consequent = top_items[index + 2]
+                raw_rule = add_seed_rule(
+                    antecedents,
+                    [consequent],
+                    confidence=round(random.uniform(0.55, 0.85), 2),
+                    lift=round(random.uniform(1.4, 3.0), 2),
+                    support=round(random.uniform(0.06, 0.18), 3),
+                )
+                cart_rules.append(
+                    CartAssociationRule(
+                        source_rule_id=raw_rule.id,
+                        antecedent_product_ids=raw_rule.antecedent_product_ids,
+                        consequent_product_ids=raw_rule.consequent_product_ids,
+                        antecedent_size=raw_rule.antecedent_size,
+                        consequent_size=raw_rule.consequent_size,
+                        confidence=raw_rule.confidence,
+                        lift=raw_rule.lift,
+                        support=raw_rule.support,
+                    )
+                )
+
     for group in by_category.values():
         if len(group) < 2:
             continue
@@ -656,6 +769,7 @@ def build_recommendation_payload(products):
 
 def seed_transactions_and_related(db, stores, devices, products, customers, config: SeedConfig):
     recommendations = []
+    recommendation_events = []
     face_events = []
     branch_metrics_map = {}
 
@@ -663,13 +777,48 @@ def seed_transactions_and_related(db, stores, devices, products, customers, conf
     for device in devices:
         devices_by_branch.setdefault(device.branch_id, []).append(device)
 
-    for index in range(1, config.transaction_count + 1):
+    demo_bundles = build_demo_bundles(products)
+    no_history_count = min(5, len(customers))
+    no_history_customer_ids = {
+        customer.id for customer in customers[:no_history_count]
+    }
+    customers_with_history = [
+        customer for customer in customers if customer.id not in no_history_customer_ids
+    ]
+
+    scheduled_customers = []
+    for customer in customers_with_history:
+        scheduled_customers.extend([customer] * random.randint(1, 3))
+
+    random.shuffle(scheduled_customers)
+
+    target_total_transactions = max(config.transaction_count, len(scheduled_customers))
+    scheduled_customer_iter = iter(scheduled_customers)
+    customer_purchase_stats = {
+        customer.id: {
+            "total_transactions": 0,
+            "total_spent": 0.0,
+            "category_counts": {},
+            "last_purchase_date": None,
+        }
+        for customer in customers
+    }
+
+    for index in range(1, target_total_transactions + 1):
         store = random.choice(stores)
         device = random.choice(devices_by_branch[store.id])
-        customer = random.choice(customers) if rand_bool(0.75) else None
-        purchased_products = random.sample(
-            products, k=random.randint(1, min(config.max_items_per_tx, len(products)))
-        )
+        customer = next(scheduled_customer_iter, None)
+        if demo_bundles and rand_bool(0.75):
+            bundle = random.choice(demo_bundles)
+            purchased_products = random.sample(
+                bundle,
+                k=random.randint(2, min(config.max_items_per_tx, len(bundle))),
+            )
+        else:
+            purchased_products = random.sample(
+                products,
+                k=random.randint(1, min(config.max_items_per_tx, len(products))),
+            )
         transaction_time = rand_date_within(45)
 
         items_data = []
@@ -721,6 +870,18 @@ def seed_transactions_and_related(db, stores, devices, products, customers, conf
         transaction.items_count = len(items_data)
         transaction.total_amount = round(total_amount, 2)
         transaction.recommended_items = recommended_payload
+        if customer:
+            customer_stats = customer_purchase_stats[customer.id]
+            customer_stats["total_transactions"] += 1
+            customer_stats["total_spent"] += total_amount
+            customer_stats["last_purchase_date"] = max(
+                customer_stats["last_purchase_date"] or transaction_time,
+                transaction_time,
+            )
+            for product in purchased_products:
+                category = product.category or "General"
+                category_counts = customer_stats["category_counts"]
+                category_counts[category] = category_counts.get(category, 0) + 1
 
         recommendations.append(
             Recommendation(
@@ -729,7 +890,7 @@ def seed_transactions_and_related(db, stores, devices, products, customers, conf
                 timestamp=transaction_time - timedelta(minutes=random.randint(1, 10)),
                 customer_id=customer.id if customer else None,
                 device_id=device.id,
-                face_attributes={
+                recommendation_context={
                     "age_group": customer.age_group if customer else random.choice(AGE_GROUPS),
                     "gender": customer.gender if customer else random.choice(["male", "female"]),
                 },
@@ -768,9 +929,104 @@ def seed_transactions_and_related(db, stores, devices, products, customers, conf
         branch_metrics_map[metric_key]["total_revenue"] += total_amount
         branch_metrics_map[metric_key]["total_recommendations"] += 1
 
+    for customer_id, stats in customer_purchase_stats.items():
+        stats_row = (
+            db.query(CustomerStats)
+            .filter(CustomerStats.customer_id == customer_id)
+            .first()
+        )
+        if not stats_row:
+            continue
+
+        total_transactions = stats["total_transactions"]
+        total_spent = round(stats["total_spent"], 2)
+        favorite_categories = [
+            category
+            for category, _ in sorted(
+                stats["category_counts"].items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:3]
+        ]
+
+        stats_row.total_transactions = total_transactions
+        stats_row.total_spent = Decimal(str(total_spent))
+        stats_row.avg_basket_size = Decimal(
+            str(round(total_spent / total_transactions, 2))
+        ) if total_transactions else Decimal("0")
+        stats_row.favorite_categories = favorite_categories
+        stats_row.last_purchase_date = stats["last_purchase_date"]
+
     db.add_all(recommendations)
     db.add_all(face_events)
     db.flush()
+
+    for recommendation in recommendations:
+        products_payload = recommendation.recommended_products or []
+        for position, product_payload in enumerate(products_payload, start=1):
+            product_id = product_payload.get("product_id")
+            if not product_id:
+                continue
+
+            recommendation_events.append(
+                RecommendationEvent(
+                    event_type="impression",
+                    product_id=int(product_id),
+                    customer_id=recommendation.customer_id,
+                    branch_id=recommendation.branch_id,
+                    device_id=recommendation.device_id,
+                    surface="seed_customer_recommendation",
+                    algorithm="seed_hybrid",
+                    position=position,
+                    session_id=recommendation.transaction_id,
+                    recommendation_id=recommendation.id,
+                    event_metadata={"source": "seed_data"},
+                    timestamp=recommendation.timestamp,
+                    created_at=recommendation.created_at,
+                )
+            )
+
+            if rand_bool(0.35):
+                recommendation_events.append(
+                    RecommendationEvent(
+                        event_type="click",
+                        product_id=int(product_id),
+                        customer_id=recommendation.customer_id,
+                        branch_id=recommendation.branch_id,
+                        device_id=recommendation.device_id,
+                        surface="seed_customer_recommendation",
+                        algorithm="seed_hybrid",
+                        position=position,
+                        session_id=recommendation.transaction_id,
+                        recommendation_id=recommendation.id,
+                        event_metadata={"source": "seed_data"},
+                        timestamp=recommendation.timestamp + timedelta(seconds=30),
+                        created_at=recommendation.created_at,
+                    )
+                )
+
+            if rand_bool(0.18):
+                recommendation_events.append(
+                    RecommendationEvent(
+                        event_type="add_to_cart",
+                        product_id=int(product_id),
+                        customer_id=recommendation.customer_id,
+                        branch_id=recommendation.branch_id,
+                        device_id=recommendation.device_id,
+                        surface="seed_customer_recommendation",
+                        algorithm="seed_hybrid",
+                        position=position,
+                        session_id=recommendation.transaction_id,
+                        recommendation_id=recommendation.id,
+                        event_metadata={"source": "seed_data"},
+                        timestamp=recommendation.timestamp + timedelta(seconds=90),
+                        created_at=recommendation.created_at,
+                    )
+                )
+
+    if recommendation_events:
+        db.add_all(recommendation_events)
+        db.flush()
 
     metrics_rows = []
     product_names = [product.name for product in products]
@@ -974,6 +1230,7 @@ def truncate_all(db):
         for model in (
             TransactionItem,
             Transaction,
+            RecommendationEvent,
             Recommendation,
             FaceEvent,
             ProductAssociation,

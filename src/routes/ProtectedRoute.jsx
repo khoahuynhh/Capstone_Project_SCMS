@@ -4,7 +4,6 @@ import { useAuth } from "../core/auth/useAuth";
 export default function ProtectedRoute({ requireAdmin = false, requireCustomer = false }) {
   const { checking, isAuthenticated, user } = useAuth();
   const isAdmin = !!user?.account?.is_admin;
-  const isCustomer = !!user?.customer;
 
   if (checking) {
     return (
@@ -35,7 +34,7 @@ export default function ProtectedRoute({ requireAdmin = false, requireCustomer =
   }
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   if (requireAdmin && !isAdmin) return <Navigate to="/product-dashboard" replace />;
-  if (requireCustomer && !isCustomer) return <Navigate to="/dashboard" replace />;
+  if (requireCustomer && isAdmin) return <Navigate to="/dashboard" replace />;
 
   return <Outlet />;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef} from 'react';
+import React, { useCallback, useState, useMemo, useEffect, useRef} from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, ShoppingCart, Search, CreditCard, Plus, Minus, Trash2, Package, LogOut, ArrowLeft } from 'lucide-react';
 import { History as HistoryIcon } from 'lucide-react';
@@ -68,7 +68,11 @@ const mapDbProductToUi = (p) => {
         discountPercentage,
         description: p.description || "",
         targetGender: p.target_gender?.toLowerCase() || 'unisex',
-        targetAgeGroup: p.target_age_group || 'all'
+        targetAgeGroup: p.target_age_group || 'all',
+        recommendationId: p.recommendation_id ?? p.recommendationId ?? null,
+        recommendationSurface: p.recommendation_surface || p.recommendationSurface,
+        recommendationAlgorithm: p.recommendation_algorithm || p.recommendationAlgorithm,
+        recommendationPosition: p.recommendation_position ?? p.recommendationPosition ?? null,
     };
 };
 
@@ -131,6 +135,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     const [activeTab, setActiveTab] = useState('cart'); // 'cart' | 'history' | 'profile'
     const [loggingOut, setLoggingOut] = useState(false);
     const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+    const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
     const customer = customerProp ?? user?.customer ?? null;
 
@@ -139,13 +144,15 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     const { products: dbProducts, isLoading: loadingProducts } = useProducts();
     const [relatedProducts, setRelatedProducts] = useState([]);
     const [isLoadingRelated, setIsLoadingRelated] = useState(false);
-    const { historyInvoices, isLoading: loadingHistory } = useCustomerHistory(customer?.customer_id);
+    const { historyInvoices, isLoading: loadingHistory } = useCustomerHistory(customer?.customer_id, historyRefreshKey);
     const [selectedProduct, setSelectedProduct] = useState(null);
     const [historyStack, setHistoryStack] = useState([]);
     const [showPayment, setShowPayment] = useState(checkoutDraft.showPayment);
     const sessionIdRef = useRef(null);
     const trackedImpressionsRef = useRef(new Set());
     const trackedAcceptancesRef = useRef(new Set());
+    const [customerRecommendationId, setCustomerRecommendationId] = useState(undefined);
+    const [relatedRecommendationId, setRelatedRecommendationId] = useState(undefined);
 
     if (!sessionIdRef.current && typeof window !== 'undefined') {
         sessionIdRef.current = getRecommendationSessionId();
@@ -254,19 +261,91 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     const cartTotal = cart.reduce((sum, item) => sum + (item.finalPrice * item.quantity), 0);
     const formatMoney = (n) => n.toLocaleString('vi-VN') + 'đ';
     const branchId = customer?.preferred_branch || import.meta.env.VITE_BRANCH_ID || 'HCM_Q1';
-    const deviceId = import.meta.env.VITE_DEVICE_ID || null;
-    const customerId = customer?.id ? Number(customer.id) : null;
+    const deviceId = import.meta.env.VITE_DEVICE_ID || 'EDGE_HCM_Q1_01';
+    const customerId = customer?.id || customer?.customer_id ? Number(customer.id || customer.customer_id) : null;
 
-    const sendRecommendationEvents = (events) => {
+    const mapProductsToBatchPayload = (products) =>
+        products.map((product, index) => ({
+            id: Number(product.id),
+            product_code: product.productCode || product.product_code || '',
+            name: product.name,
+            price: product.finalPrice ?? product.price ?? product.originalPrice ?? 0,
+            category: product.category,
+            recommendation_position: index + 1,
+        }));
+
+    useEffect(() => {
+        if (!isOpen || showPayment || loadingProducts || displayProducts.length === 0) {
+            setCustomerRecommendationId(undefined);
+            return undefined;
+        }
+
+        let cancelled = false;
+        setCustomerRecommendationId(undefined);
+        serverApi.createRecommendationBatch({
+            branchId,
+            customerId,
+            deviceId,
+            sessionId: sessionIdRef.current,
+            surface: 'customer_recommendation',
+            algorithm: 'purchase_history_sort',
+            context: { search_term: searchTerm || null },
+            products: mapProductsToBatchPayload(displayProducts),
+        })
+            .then((data) => {
+                if (!cancelled) setCustomerRecommendationId(data?.recommendation_id ?? null);
+            })
+            .catch((error) => {
+                console.error('Failed to create recommendation batch:', error);
+                if (!cancelled) setCustomerRecommendationId(null);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, showPayment, loadingProducts, displayProducts, searchTerm, branchId, customerId, deviceId]);
+
+    useEffect(() => {
+        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) {
+            setRelatedRecommendationId(undefined);
+            return undefined;
+        }
+
+        let cancelled = false;
+        setRelatedRecommendationId(undefined);
+        serverApi.createRecommendationBatch({
+            branchId,
+            customerId,
+            deviceId,
+            sessionId: sessionIdRef.current,
+            surface: 'related_products',
+            algorithm: 'association_rules',
+            context: { source_product_id: selectedProduct.id },
+            products: mapProductsToBatchPayload(relatedProducts),
+        })
+            .then((data) => {
+                if (!cancelled) setRelatedRecommendationId(data?.recommendation_id ?? null);
+            })
+            .catch((error) => {
+                console.error('Failed to create related recommendation batch:', error);
+                if (!cancelled) setRelatedRecommendationId(null);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, showPayment, selectedProduct, relatedProducts, branchId, customerId, deviceId]);
+
+    const sendRecommendationEvents = useCallback((events) => {
         if (!events.length) return;
         for (let i = 0; i < events.length; i += 100) {
             serverApi.recommendationEvents(events.slice(i, i + 100)).catch((error) => {
-                console.error('Lỗi ghi recommendation event:', error);
+                console.error('Failed to write recommendation event:', error);
             });
         }
-    };
+    }, []);
 
-    const buildRecommendationEvent = (eventType, product, position, surface, algorithm) => ({
+    const buildRecommendationEvent = useCallback((eventType, product, position, surface, algorithm) => ({
         event_type: eventType,
         product_id: Number(product.id),
         customer_id: customerId,
@@ -276,7 +355,10 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
         algorithm,
         position,
         session_id: sessionIdRef.current,
-    });
+        recommendation_id: product.recommendationId
+            ?? (surface === 'customer_recommendation' ? customerRecommendationId : null)
+            ?? (surface === 'related_products' ? relatedRecommendationId : null),
+    }), [branchId, customerId, customerRecommendationId, deviceId, relatedRecommendationId]);
 
     const getRecommendationAttribution = (product) => ({
         surface: product.recommendationSurface || 'customer_recommendation',
@@ -285,7 +367,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
     });
 
     useEffect(() => {
-        if (!isOpen || showPayment || loadingProducts || displayProducts.length === 0) return;
+        if (!isOpen || showPayment || loadingProducts || customerRecommendationId === undefined || displayProducts.length === 0) return;
 
         const events = [];
         displayProducts.forEach((product, index) => {
@@ -303,10 +385,10 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
         });
 
         sendRecommendationEvents(events);
-    }, [isOpen, showPayment, loadingProducts, displayProducts, searchTerm]);
+    }, [buildRecommendationEvent, isOpen, showPayment, loadingProducts, customerRecommendationId, displayProducts, searchTerm, sendRecommendationEvents]);
 
     useEffect(() => {
-        if (!isOpen || showPayment || !selectedProduct || relatedProducts.length === 0) return;
+        if (!isOpen || showPayment || !selectedProduct || relatedRecommendationId === undefined || relatedProducts.length === 0) return;
 
         const events = [];
         relatedProducts.forEach((product, index) => {
@@ -324,7 +406,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
         });
 
         sendRecommendationEvents(events);
-    }, [isOpen, showPayment, selectedProduct, relatedProducts]);
+    }, [buildRecommendationEvent, isOpen, showPayment, selectedProduct, relatedRecommendationId, relatedProducts, sendRecommendationEvents]);
 
     // --- ACTIONS ---
     const addToCart = (product) => {
@@ -428,7 +510,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                         <div>
                             <h2 style={{ margin: 0 }}>
                                 {purchaseStats.byProductId.size > 0
-                                    ? "Gợi ý riêng cho khách"
+                                    ? "Danh sách sản phẩm"
                                     : "Danh sách sản phẩm"}
                             </h2>
                             {customer ? (
@@ -466,7 +548,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                                 </button>
                             ) : null}
                             {onClose ? (
-                                <button onClick={onClose} className="recoCloseBtn" type="button">
+                                <button onClick={onClose} className="recoCloseBtn" type="button" aria-label="Đóng gợi ý sản phẩm">
                                     ✕
                                 </button>
                             ) : null}
@@ -475,7 +557,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
 
                     {/* --- BODY --- */}
                     {activeTab === 'profile' ? (
-                        <CustomerProfile customer={customer} />
+                        <CustomerProfile customer={customer} historyRefreshKey={historyRefreshKey} />
                     ) : (
                     <div className="recoBody">
                         {/* 1. CỘT TRÁI */}
@@ -602,6 +684,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                                                     <button
                                                         className="recoRemoveBtn"
                                                         onClick={(e) => { e.stopPropagation(); removeProduct(item.id) }}
+                                                        aria-label={`Xóa ${item.name} khỏi giỏ hàng`}
                                                     >
                                                         <Trash2 size={18} />
                                                     </button>
@@ -662,13 +745,14 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                                     <button 
                                         className="recoDetailCloseBtn" 
                                         onClick={handleGoBack}
+                                        aria-label="Quay lại sản phẩm trước"
                                         title="Quay lại sản phẩm trước"
                                         style={{ marginRight: '8px' }} // Cách nút Đóng một chút
                                     >
                                         <ArrowLeft size={24} />
                                     </button>
                                 )}
-                                <button className="recoDetailClose" onClick={() => setSelectedProduct(null)}>
+                                <button className="recoDetailClose" onClick={() => setSelectedProduct(null)} aria-label="Đóng chi tiết sản phẩm">
                                     ✕
                                 </button>
                                 <div className="recoDetailGrid">
@@ -792,6 +876,7 @@ const ProductRecommendation = ({ customer: customerProp, isOpen = true, onClose,
                     onBack={() => setShowPayment(false)}
                     onPaymentComplete={() => {
                         window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
+                        setHistoryRefreshKey((key) => key + 1);
                         setCart([]);
                         setShowPayment(false);
                         onClose?.();

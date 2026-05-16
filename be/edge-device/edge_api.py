@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import shutil
@@ -9,6 +10,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
 from PIL import Image
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from starlette.responses import Response
@@ -16,6 +18,7 @@ from starlette.responses import Response
 from config import get_settings
 from modules.mqtt_client import MQTTClient
 from modules.onnx_predictor import OnnxFaceAttrPredictor
+from modules.preprocessor import FacePreprocessor
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -41,17 +44,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "models")
-MODEL_DIR = os.path.join(BASE_DIR, MODEL_STORAGE_PATH)
+MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", settings.MODEL_STORAGE_PATH)
+MODEL_DIR = (
+    MODEL_STORAGE_PATH
+    if os.path.isabs(MODEL_STORAGE_PATH)
+    else os.path.normpath(os.path.join(BASE_DIR, MODEL_STORAGE_PATH))
+)
+
+KNOWN_FACE_ATTR_MODELS = (
+    "best_model_v2_embedder.onnx",
+    "best_model.onnx",
+    "embedder.onnx",
+)
 
 
 def resolve_model_path() -> str:
-    configured_model = os.getenv("FACE_ATTR_MODEL_FILE", "best_model.onnx")
-    configured_path = os.path.join(MODEL_DIR, configured_model)
+    configured_model = os.getenv("FACE_ATTR_MODEL_FILE", settings.FACE_ATTR_MODEL_FILE)
+    configured_path = (
+        configured_model
+        if os.path.isabs(configured_model)
+        else os.path.join(MODEL_DIR, configured_model)
+    )
     if os.path.exists(configured_path):
         return configured_path
 
-    for file_name in ("best_model.onnx",):
+    for file_name in KNOWN_FACE_ATTR_MODELS:
         candidate = os.path.join(MODEL_DIR, file_name)
         if os.path.exists(candidate):
             return candidate
@@ -67,6 +84,15 @@ def resolve_model_path() -> str:
 MODEL_PATH = resolve_model_path()
 
 attr_predictor = None
+face_preprocessor = None
+
+
+def resolve_edge_path(path: str) -> str:
+    if not path:
+        return ""
+    if os.path.isabs(path):
+        return path
+    return os.path.normpath(os.path.join(BASE_DIR, path))
 
 
 def build_predictor(model_path: str) -> OnnxFaceAttrPredictor:
@@ -125,6 +151,10 @@ def install_model(temp_model_path: str, metadata: Dict[str, Any] | None = None) 
 
 
 attr_predictor = load_predictor(MODEL_PATH)
+face_preprocessor = FacePreprocessor(
+    detector_model_path=resolve_edge_path(settings.FACE_DETECTION_MODEL_PATH),
+    detection_confidence=settings.FACE_DETECTION_CONFIDENCE,
+)
 mqtt_client = MQTTClient(BRANCH_ID, on_model_update=install_model)
 
 INFERENCE_COUNTER = Counter(
@@ -233,6 +263,10 @@ def health_check() -> Dict[str, Any]:
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "model_loaded": attr_predictor is not None,
+        "model_path": MODEL_PATH,
+        "model_dir": MODEL_DIR,
+        "preprocessing_enabled": settings.FACE_PREPROCESSING_ENABLED,
+        "preprocessor_detector": getattr(face_preprocessor, "detector_backend", None),
         "mqtt_connected": mqtt_client.connected,
         "heartbeat_enabled": settings.HEARTBEAT_ENABLED,
     }
@@ -261,13 +295,22 @@ async def face_analysis(file: UploadFile = File(...)) -> Dict[str, Any]:
                 status_code=500, detail="Face attribute model is not loaded"
             )
 
-        attributes = normalize_attributes(predictor.predict(image))
+        inference_image = image
+        if settings.FACE_PREPROCESSING_ENABLED:
+            image_rgb = np.asarray(image, dtype=np.uint8)
+            with predictor_lock:
+                inference_image = face_preprocessor.process_rgb_array(image_rgb)
+
+            if inference_image is None:
+                raise HTTPException(status_code=422, detail="No usable face detected")
+
+        attributes = normalize_attributes(predictor.predict(inference_image))
 
         latency = time.time() - start
         INFERENCE_COUNTER.inc()
         INFERENCE_LATENCY.observe(latency)
 
-        return {
+        response = {
             "success": True,
             "branch_id": BRANCH_ID,
             "device_id": DEVICE_ID,
@@ -277,8 +320,15 @@ async def face_analysis(file: UploadFile = File(...)) -> Dict[str, Any]:
             "emotion": attributes["emotion"],
             "face_attributes": attributes,
             "source": "edge_face_attribute_model",
+            "preprocessed": settings.FACE_PREPROCESSING_ENABLED,
             "latency_ms": round(latency * 1000, 2),
         }
+
+        logger.info(
+            "FACE_ANALYSIS_RESPONSE %s",
+            json.dumps(response, ensure_ascii=False, default=str),
+        )
+        return response
     except HTTPException:
         INFERENCE_ERRORS.inc()
         raise
